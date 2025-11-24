@@ -75,3 +75,61 @@ class UpbitAPIClient:
                 requests.exceptions.Timeout,
                 requests.exceptions.RequestException) as e:
             raise e
+
+    def fetch_candles(
+            self,
+            market: str,
+            interval: str,
+            count: int = 200,
+            to: Optional[str] = None,
+            timeout: int = 30
+    ) -> Optional[List[Dict]]:
+        """
+        캠들 데이터 API 호출
+        
+        Args:
+            market: 마켓 코드
+            interval: 캠들 간격 (1, 5, 15, 30, 60, 240, day, week, month)
+            count: 조회 개수 (최대 200)
+            to: 마지막 캠들 시각 (yyyy-MM-dd'T'HH:mm:ss'Z' or yyyy-MM-dd HH:mm:ss)
+            timeout: 타임아웃 (초)
+            
+        Returns:
+            캠들 데이터 리스트 또는 None
+        """
+        # interval에 따라 endpoint 결정
+        if interval in ['1', '5', '15', '30', '60', '240']:
+            endpoint = f"{self.base_url}/candles/minutes/{interval}"
+        elif interval == 'day':
+            endpoint = f"{self.base_url}/candles/days"
+        elif interval == 'week':
+            endpoint = f"{self.base_url}/candles/weeks"
+        elif interval == 'month':
+            endpoint = f"{self.base_url}/candles/months"
+        else:
+            raise ValueError(f"지원하지 않는 interval: {interval}")
+
+        params = {
+            "market": market,
+            "count": min(count, 200)
+        }
+
+        if to:
+            params["to"] = to
+
+        try:
+            response = self.session.get(
+                endpoint,
+                params=params,
+                timeout=timeout
+            )
+
+            if response.status_code != 200:
+                return None, response.status_code, response.text
+
+            return response.json(), response.status_code, None
+
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout,
+                requests.exceptions.RequestException) as e:
+            raise e
