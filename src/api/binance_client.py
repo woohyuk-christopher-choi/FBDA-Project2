@@ -75,3 +75,49 @@ class BinanceAPIClient:
                 requests.exceptions.Timeout,
                 requests.exceptions.RequestException) as e:
             raise e
+
+    def fetch_klines(
+            self,
+            symbol: str,
+            interval: str,
+            start_time: int,
+            end_time: int,
+            timeout: int = 30
+    ) -> Optional[List[Dict]]:
+        """
+        캠들 데이터 API 호출
+        
+        Args:
+            symbol: 거래쌍
+            interval: 캔들 간격 (1m, 5m, 15m, 30m, 1h, 1d 등)
+            start_time: 시작 시간 (밀리초)
+            end_time: 종료 시간 (밀리초)
+            timeout: 타임아웃 (초)
+            
+        Returns:
+            캠들 데이터 리스트 또는 None
+        """
+        params = {
+            "symbol": symbol,
+            "interval": interval,
+            "startTime": start_time,
+            "endTime": end_time,
+            "limit": 1000
+        }
+
+        try:
+            response = self.session.get(
+                f"{self.base_url}/klines",
+                params=params,
+                timeout=timeout
+            )
+
+            if response.status_code != 200:
+                return None, response.status_code, response.text
+
+            return response.json(), response.status_code, response.headers
+
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout,
+                requests.exceptions.RequestException) as e:
+            raise e

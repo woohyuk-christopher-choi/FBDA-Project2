@@ -100,32 +100,57 @@ class UIManager:
         table.add_column("값", style="green")
 
         table.add_row("기간", f"{df['datetime'].min()} ~ {df['datetime'].max()}")
-        table.add_row("거래 건수", f"{len(df):,}개")
+        table.add_row("데이터 건수", f"{len(df):,}개")
 
-        # 가격 필드명 확인
-        price_col = 'price' if 'price' in df.columns else 'trade_price'
-        volume_col = 'quantity' if 'quantity' in df.columns else 'trade_volume'
+        # 데이터 타입 확인 (캔들 vs 거래)
+        is_klines = 'open' in df.columns and 'close' in df.columns
         
         # 통화 기호
         currency = "$" if exchange == "바이낸스" else "₩"
         
-        if exchange == "바이낸스":
-            table.add_row("평균 가격", f"{currency}{df[price_col].mean():,.2f}")
-            table.add_row("최고가", f"{currency}{df[price_col].max():,.2f}")
-            table.add_row("최저가", f"{currency}{df[price_col].min():,.2f}")
-            table.add_row("총 거래량", f"{df[volume_col].sum():,.4f}")
-            table.add_row("총 거래 금액", f"{currency}{df['amount'].sum():,.2f}")
+        if is_klines:
+            # 캔들 데이터 통계
+            if exchange == "바이낸스":
+                table.add_row("시가 평균", f"{currency}{df['open'].mean():,.2f}")
+                table.add_row("최고가", f"{currency}{df['high'].max():,.2f}")
+                table.add_row("최저가", f"{currency}{df['low'].min():,.2f}")
+                table.add_row("종가 평균", f"{currency}{df['close'].mean():,.2f}")
+                table.add_row("총 거래량", f"{df['volume'].sum():,.4f}")
+                if 'quote_volume' in df.columns:
+                    table.add_row("총 거래 금액", f"{currency}{df['quote_volume'].sum():,.2f}")
+            else:
+                table.add_row("시가 평균", f"{currency}{df['open'].mean():,.0f}")
+                table.add_row("최고가", f"{currency}{df['high'].max():,.0f}")
+                table.add_row("최저가", f"{currency}{df['low'].min():,.0f}")
+                table.add_row("종가 평균", f"{currency}{df['close'].mean():,.0f}")
+                table.add_row("총 거래량", f"{df['volume'].sum():,.4f}")
+                if 'quote_volume' in df.columns:
+                    table.add_row("총 거래 금액", f"{currency}{df['quote_volume'].sum():,.0f}")
         else:
-            table.add_row("평균 가격", f"{currency}{df[price_col].mean():,.0f}")
-            table.add_row("최고가", f"{currency}{df[price_col].max():,.0f}")
-            table.add_row("최저가", f"{currency}{df[price_col].min():,.0f}")
-            table.add_row("총 거래량", f"{df[volume_col].sum():,.4f}")
-            table.add_row("총 거래 금액", f"{currency}{df['amount'].sum():,.0f}")
+            # 거래 데이터 통계
+            price_col = 'price' if 'price' in df.columns else 'trade_price'
+            volume_col = 'quantity' if 'quantity' in df.columns else 'trade_volume'
+            
+            if exchange == "바이낸스":
+                table.add_row("평균 가격", f"{currency}{df[price_col].mean():,.2f}")
+                table.add_row("최고가", f"{currency}{df[price_col].max():,.2f}")
+                table.add_row("최저가", f"{currency}{df[price_col].min():,.2f}")
+                table.add_row("총 거래량", f"{df[volume_col].sum():,.4f}")
+                if 'amount' in df.columns:
+                    table.add_row("총 거래 금액", f"{currency}{df['amount'].sum():,.2f}")
+            else:
+                table.add_row("평균 가격", f"{currency}{df[price_col].mean():,.0f}")
+                table.add_row("최고가", f"{currency}{df[price_col].max():,.0f}")
+                table.add_row("최저가", f"{currency}{df[price_col].min():,.0f}")
+                table.add_row("총 거래량", f"{df[volume_col].sum():,.4f}")
+                if 'amount' in df.columns:
+                    table.add_row("총 거래 금액", f"{currency}{df['amount'].sum():,.0f}")
 
-        # 매수/매도 통계
-        side_counts = df.group_by('side').count()
-        for row in side_counts.iter_rows(named=True):
-            table.add_row(f"{row['side']} 거래", f"{row['count']:,}건")
+            # 매수/매도 통계 (거래 데이터만)
+            if 'side' in df.columns:
+                side_counts = df.group_by('side').count()
+                for row in side_counts.iter_rows(named=True):
+                    table.add_row(f"{row['side']} 거래", f"{row['count']:,}건")
 
         console.print(table)
 
