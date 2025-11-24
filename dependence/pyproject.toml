@@ -1,0 +1,17 @@
+[tool.poetry]
+name = "crypto-collector"
+version = "0.1.0"
+description = "암호화폐 거래소 데이터 수집기 (Polars + Arrow)"
+authors = ["Your Name <you@example.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.8"
+requests = "^2.31.0"
+polars = "^0.20.0"
+pyarrow = "^14.0.0"
+rich = "^13.7.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

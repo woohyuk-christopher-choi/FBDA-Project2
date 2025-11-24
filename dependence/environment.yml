@@ -1,0 +1,10 @@
+name: crypto-collector
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python>=3.8
+  - requests>=2.31.0
+  - polars>=0.20.0
+  - pyarrow>=14.0.0
+  - rich>=13.7.0
