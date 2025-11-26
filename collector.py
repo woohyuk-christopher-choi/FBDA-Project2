@@ -39,9 +39,10 @@ def main():
     console.print("  [cyan]3.[/cyan] 5분봉 (5m)")
     console.print("  [cyan]4.[/cyan] 15분봉 (15m)")
     console.print("  [cyan]5.[/cyan] 30분봉 (30m)")
-    console.print("  [cyan]6.[/cyan] 일봉 (1d)")
+    console.print("  [cyan]6.[/cyan] 1시간봉 (1h)")
+    console.print("  [cyan]7.[/cyan] 일봉 (1d)")
 
-    data_type_choice = ui.get_input("선택 (1-6, 기본 1):") or "1"
+    data_type_choice = ui.get_input("선택 (1-7, 기본 1):") or "1"
 
     data_type_map = {
         "1": ("trades", None),
@@ -49,7 +50,8 @@ def main():
         "3": ("5m", "5m"),
         "4": ("15m", "15m"),
         "5": ("30m", "30m"),
-        "6": ("1d", "1d")
+        "6": ("1h", "1h"),
+        "7": ("1d", "1d")
     }
     data_type, interval = data_type_map.get(data_type_choice, ("trades", None))
 
@@ -141,6 +143,7 @@ def main():
                 "5m": 5,
                 "15m": 15,
                 "30m": 30,
+                "1h": 60,
                 "1d": 1440
             }
             

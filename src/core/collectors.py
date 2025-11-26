@@ -16,7 +16,7 @@ from src.utils import UIManager
 class BinanceTradeCollector:
     """바이낸스 거래 데이터 수집 클래스"""
 
-    def __init__(self, output_dir: str = "data"):
+    def __init__(self, output_dir: str = "file"):
         self.client = BinanceAPIClient()
         self.processor = BinanceDataProcessor()
         self.storage = DataStorage(output_dir)
@@ -531,7 +531,7 @@ class BinanceTradeCollector:
 class UpbitTradeCollector:
     """업비트 거래 데이터 수집 클래스"""
 
-    def __init__(self, output_dir: str = "data"):
+    def __init__(self, output_dir: str = "file"):
         self.client = UpbitAPIClient()
         self.processor = UpbitDataProcessor()
         self.storage = DataStorage(output_dir)
