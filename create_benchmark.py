@@ -690,7 +690,7 @@ def display_benchmark_summary(benchmark_df: pl.DataFrame, timeframe: str):
 
     # Return statistics
     returns = benchmark_df['index_return'].drop_nulls()
-    if returns.height > 0:
+    if len(returns) > 0:
         avg_return = returns.mean() * 100
         std_return = returns.std() * 100
         min_return = returns.min() * 100
