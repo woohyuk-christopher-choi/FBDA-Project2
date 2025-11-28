@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Binance 벤치마크 생성을 위한 자동 데이터 수집 스크립트
-모든 필요한 심볼과 캔들 타입을 순차적으로 2년치 수집합니다.
+자동 데이터 수집 스크립트
+Binance와 Upbit 벤치마크 생성에 필요한 모든 심볼과 캔들 타입을 순차적으로 수집합니다.
 """
 
 import time
@@ -12,7 +12,7 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
 from rich.table import Table
 
-from src.core import BinanceTradeCollector
+from src.core import BinanceTradeCollector, UpbitTradeCollector
 
 console = Console()
 
@@ -53,6 +53,30 @@ REBALANCING_PERIODS = [
 # 지원하는 캔들 타입
 CANDLE_TYPES = ['1m', '5m', '15m', '30m', '1h', '1d']
 
+# 업비트 벤치마크 구성 종목 (고정)
+UPBIT_CONSTITUENTS = [
+    "BTC",   # 비트코인
+    "ETH",   # 이더리움
+    "USDT",  # 테더
+    "XRP",   # 리플
+    "SOL",   # 솔라나
+    "USDC",  # USD코인
+    "TRX",   # 트론
+    "DOGE",  # 도지코인
+    "ADA",   # 에이다
+    "BCH"    # 비트코인캐시
+]
+
+# 업비트 캔들 타입 매핑
+UPBIT_CANDLE_MAP = {
+    '1m': '1',
+    '5m': '5',
+    '15m': '15',
+    '30m': '30',
+    '1h': '60',
+    '1d': 'day'
+}
+
 # 수집 기간 설정 (2년 = 730일)
 COLLECTION_DAYS = 730
 
@@ -65,12 +89,19 @@ def get_all_unique_symbols() -> List[str]:
     return sorted(list(symbols))
 
 
-def check_existing_data(data_dir: Path, symbol: str, candle_type: str) -> bool:
+def check_existing_data(data_dir: Path, symbol: str, candle_type: str, exchange: str = 'binance') -> bool:
     """기존 데이터가 충분한지 확인"""
-    possible_files = [
-        data_dir / "binance" / f"{symbol}USDT_{candle_type}.parquet",
-        data_dir / "binance" / f"{symbol}USDT_{candle_type}.arrow",
-    ]
+    if exchange == 'binance':
+        possible_files = [
+            data_dir / f"binance_{symbol}USDT_{candle_type}.parquet",
+            data_dir / f"binance_{symbol}USDT_{candle_type}.arrow",
+        ]
+    else:  # upbit
+        upbit_tf = UPBIT_CANDLE_MAP.get(candle_type, candle_type)
+        possible_files = [
+            data_dir / f"upbit_KRW-{symbol}_{upbit_tf}m.parquet",
+            data_dir / f"upbit_KRW-{symbol}_{upbit_tf}m.arrow",
+        ]
     
     for file_path in possible_files:
         if file_path.exists():
@@ -80,17 +111,19 @@ def check_existing_data(data_dir: Path, symbol: str, candle_type: str) -> bool:
     return False
 
 
-def display_collection_plan(symbols: List[str], candle_types: List[str], data_dir: Path):
+def display_collection_plan(symbols: List[str], candle_types: List[str], data_dir: Path, exchange: str = 'binance'):
     """수집 계획 표시"""
+    exchange_name = "Binance" if exchange == 'binance' else "Upbit"
     console.print("\n[bold cyan]═══════════════════════════════════════════════════════[/bold cyan]")
-    console.print("[bold cyan]  자동 데이터 수집 계획 (Auto Collection Plan)  [/bold cyan]")
+    console.print(f"[bold cyan]  {exchange_name} 자동 데이터 수집 계획  [/bold cyan]")
     console.print("[bold cyan]═══════════════════════════════════════════════════════[/bold cyan]\n")
     
+    console.print(f"[bold]거래소:[/bold] {exchange_name}")
     console.print(f"[bold]수집 기간:[/bold] 최근 {COLLECTION_DAYS}일 (약 2년)")
     console.print(f"[bold]심볼 개수:[/bold] {len(symbols)}개")
     console.print(f"[bold]캔들 타입:[/bold] {', '.join(candle_types)}")
     console.print(f"[bold]총 작업 수:[/bold] {len(symbols) * len(candle_types)}개")
-    console.print(f"[bold]저장 위치:[/bold] {data_dir / 'binance'}\n")
+    console.print(f"[bold]저장 위치:[/bold] {data_dir}\n")
     
     # 기존 데이터 확인
     existing_count = 0
@@ -98,7 +131,7 @@ def display_collection_plan(symbols: List[str], candle_types: List[str], data_di
     
     for symbol in symbols:
         for candle_type in candle_types:
-            if check_existing_data(data_dir, symbol, candle_type):
+            if check_existing_data(data_dir, symbol, candle_type, exchange):
                 existing_count += 1
             else:
                 missing_items.append((symbol, candle_type))
@@ -109,7 +142,11 @@ def display_collection_plan(symbols: List[str], candle_types: List[str], data_di
     # 심볼 목록 표시
     console.print("[bold]수집 대상 심볼:[/bold]")
     for i, symbol in enumerate(symbols, 1):
-        console.print(f"  {i:2d}. {symbol}USDT", end="")
+        if exchange == 'binance':
+            display_symbol = f"{symbol}USDT"
+        else:
+            display_symbol = f"KRW-{symbol}"
+        console.print(f"  {i:2d}. {display_symbol}", end="")
         if i % 5 == 0:
             console.print()  # 5개마다 줄바꿈
         else:
@@ -124,12 +161,13 @@ def collect_all_data(
     candle_types: List[str],
     data_dir: Path,
     skip_existing: bool = True,
-    save_format: str = "parquet"
+    save_format: str = "parquet",
+    exchange: str = 'binance'
 ):
     """모든 심볼과 캔들 타입에 대해 데이터 수집"""
     
     # 수집 계획 표시
-    missing_items = display_collection_plan(symbols, candle_types, data_dir)
+    missing_items = display_collection_plan(symbols, candle_types, data_dir, exchange)
     
     if not missing_items and skip_existing:
         console.print("[bold green]✓ 모든 데이터가 이미 수집되어 있습니다![/bold green]\n")
@@ -155,12 +193,14 @@ def collect_all_data(
     
     console.print(f"\n[bold green]데이터 수집을 시작합니다...[/bold green]\n")
     
-    # BinanceTradeCollector 초기화
-    collector = BinanceTradeCollector(output_dir="file")
-    
-    # 시작/종료 시간 계산
-    now = int(time.time() * 1000)
-    start_time = now - (COLLECTION_DAYS * 86400000)  # 730일 전
+    # Collector 초기화
+    if exchange == 'binance':
+        collector = BinanceTradeCollector(output_dir="file")
+        # 시작/종료 시간 계산 (Binance는 밀리초)
+        now = int(time.time() * 1000)
+        start_time = now - (COLLECTION_DAYS * 86400000)  # 730일 전
+    else:
+        collector = UpbitTradeCollector(output_dir="file")
     
     # 통계
     total_items = len(items_to_collect)
@@ -172,37 +212,64 @@ def collect_all_data(
     start_timestamp = datetime.now()
     
     for idx, (symbol, candle_type) in enumerate(items_to_collect, 1):
-        symbol_with_usdt = f"{symbol}USDT"
+        if exchange == 'binance':
+            symbol_full = f"{symbol}USDT"
+        else:
+            symbol_full = f"KRW-{symbol}"
         
         # 기존 데이터 확인
-        if skip_existing and check_existing_data(data_dir, symbol, candle_type):
-            console.print(f"[dim]({idx}/{total_items}) {symbol_with_usdt} {candle_type}: 이미 존재함 (건너뜀)[/dim]")
+        if skip_existing and check_existing_data(data_dir, symbol, candle_type, exchange):
+            console.print(f"[dim]({idx}/{total_items}) {symbol_full} {candle_type}: 이미 존재함 (건너뜀)[/dim]")
             skipped_count += 1
             continue
         
         console.print(f"\n[bold cyan]{'='*60}[/bold cyan]")
         console.print(f"[bold]진행 상황: {idx}/{total_items}[/bold]")
-        console.print(f"[bold]심볼: {symbol_with_usdt} | 캔들: {candle_type}[/bold]")
+        console.print(f"[bold]심볼: {symbol_full} | 캔들: {candle_type}[/bold]")
         console.print(f"[bold cyan]{'='*60}[/bold cyan]\n")
         
         try:
-            # 데이터 수집 (캔들 데이터)
-            df = collector.collect_klines(
-                symbol=symbol_with_usdt,
-                interval=candle_type,
-                start_time=start_time,
-                end_time=now,
-                max_klines=None,  # 제한 없음
-                save_format=save_format,
-                data_type=candle_type
-            )
+            if exchange == 'binance':
+                # Binance 데이터 수집
+                df = collector.collect_klines(
+                    symbol=symbol_full,
+                    interval=candle_type,
+                    start_time=start_time,
+                    end_time=now,
+                    max_klines=None,  # 제한 없음
+                    save_format=save_format,
+                    data_type=candle_type
+                )
+            else:
+                # Upbit 데이터 수집
+                # 캔들 타입별로 필요한 개수 계산
+                interval_minutes = {
+                    "1m": 1,
+                    "5m": 5,
+                    "15m": 15,
+                    "30m": 30,
+                    "1h": 60,
+                    "1d": 1440
+                }
+                minutes = interval_minutes.get(candle_type, 1)
+                max_items = (COLLECTION_DAYS * 24 * 60) // minutes
+                
+                upbit_interval = UPBIT_CANDLE_MAP.get(candle_type, candle_type)
+                
+                df = collector.collect_data(
+                    market=symbol_full,
+                    data_type=candle_type,
+                    interval=upbit_interval,
+                    max_items=max_items,
+                    save_format=save_format
+                )
             
             if df is not None and df.height > 0:
                 success_count += 1
-                console.print(f"[green]✓ 완료: {symbol_with_usdt} {candle_type} ({df.height:,}개 캔들)[/green]")
+                console.print(f"[green]✓ 완료: {symbol_full} {candle_type} ({df.height:,}개 캔들)[/green]")
             else:
-                failed_items.append((symbol_with_usdt, candle_type, "데이터 없음"))
-                console.print(f"[yellow]⚠ 경고: {symbol_with_usdt} {candle_type} - 데이터 없음[/yellow]")
+                failed_items.append((symbol_full, candle_type, "데이터 없음"))
+                console.print(f"[yellow]⚠ 경고: {symbol_full} {candle_type} - 데이터 없음[/yellow]")
             
             # Rate limit 방지 - 요청 간 대기
             if idx < total_items:
@@ -212,8 +279,8 @@ def collect_all_data(
             console.print(f"\n[bold red]사용자에 의해 중단되었습니다.[/bold red]")
             break
         except Exception as e:
-            failed_items.append((symbol_with_usdt, candle_type, str(e)))
-            console.print(f"[red]✗ 오류: {symbol_with_usdt} {candle_type} - {e}[/red]")
+            failed_items.append((symbol_full, candle_type, str(e)))
+            console.print(f"[red]✗ 오류: {symbol_full} {candle_type} - {e}[/red]")
             continue
     
     # 최종 통계 표시
@@ -256,19 +323,40 @@ def collect_all_data(
 def main():
     """메인 실행 함수"""
     console.print("\n[bold cyan]═══════════════════════════════════════════════════════[/bold cyan]")
-    console.print("[bold cyan]  Binance 벤치마크 자동 데이터 수집기  [/bold cyan]")
+    console.print("[bold cyan]  벤치마크 자동 데이터 수집기  [/bold cyan]")
     console.print("[bold cyan]═══════════════════════════════════════════════════════[/bold cyan]\n")
     
-    # 데이터 디렉토리 설정
-    data_dir = Path("data")
-    data_dir.mkdir(exist_ok=True)
-    (data_dir / "binance").mkdir(exist_ok=True)
+    # 거래소 선택
+    console.print("[bold]거래소 선택:[/bold]")
+    console.print("  [cyan]1.[/cyan] Binance (CMC Top 10 구성종목)")
+    console.print("  [cyan]2.[/cyan] Upbit (고정 10개 종목)")
+    console.print("  [cyan]3.[/cyan] 둘 다")
     
-    # 심볼 목록 가져오기
-    symbols = get_all_unique_symbols()
+    exchange_choice = input("\n선택 (1-3, 기본 1): ").strip() or "1"
+    
+    # 데이터 디렉토리 설정
+    data_dir = Path("file")
+    data_dir.mkdir(exist_ok=True)
+    
+    # Binance 수집
+    if exchange_choice in ["1", "3"]:
+        console.print("\n[bold magenta]===== Binance 데이터 수집 =====[/bold magenta]")
+        symbols = get_all_unique_symbols()
+        process_exchange_collection(symbols, data_dir, 'binance')
+    
+    # Upbit 수집
+    if exchange_choice in ["2", "3"]:
+        console.print("\n[bold magenta]===== Upbit 데이터 수집 =====[/bold magenta]")
+        symbols = UPBIT_CONSTITUENTS
+        process_exchange_collection(symbols, data_dir, 'upbit')
+
+
+def process_exchange_collection(symbols: List[str], data_dir: Path, exchange: str):
+    """거래소별 데이터 수집 처리"""
+    exchange_name = "Binance" if exchange == 'binance' else "Upbit"
     
     # 수집할 캔들 타입 선택
-    console.print("[bold]수집할 캔들 타입 선택:[/bold]")
+    console.print(f"\n[bold]{exchange_name} 수집할 캔들 타입 선택:[/bold]")
     console.print("  [cyan]1.[/cyan] 모든 캔들 타입 (1m, 5m, 15m, 30m, 1h, 1d)")
     console.print("  [cyan]2.[/cyan] 1분봉만 (1m)")
     console.print("  [cyan]3.[/cyan] 5분봉만 (5m)")
@@ -313,7 +401,8 @@ def main():
             candle_types=selected_candles,
             data_dir=data_dir,
             skip_existing=True,
-            save_format=save_format
+            save_format=save_format,
+            exchange=exchange
         )
     except KeyboardInterrupt:
         console.print("\n[bold yellow]프로그램이 사용자에 의해 중단되었습니다.[/bold yellow]\n")
