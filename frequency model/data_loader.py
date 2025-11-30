@@ -137,73 +137,102 @@ class CryptoDataLoader:
         prices_df = prices_df.ffill(limit=5)
         return prices_df
 
-    def calculate_returns(self, prices: pd.DataFrame, method: str = 'log') -> pd.DataFrame:
-        if method == 'log':
-            returns = np.log(prices / prices.shift(1))
+    def calculate_returns(
+        self,
+        prices: pd.DataFrame,
+        method: str = 'log'
+    ) -> pd.DataFrame:
+        """
+        Calculate returns from prices.
+        Strictly uses 'close' column if available, or float columns only.
+        """
+        # [수정] 1. 'close' 컬럼이 명시적으로 존재하면 그것만 사용 (단일 종목 OHLCV 데이터인 경우)
+        if 'close' in prices.columns:
+            target_prices = prices[['close']]
         else:
-            returns = prices.pct_change()
-        return returns.dropna()
+            # [수정] 2. 여러 종목인 경우: int(타임스탬프)를 제외하고 float(가격)만 선택
+            target_prices = prices.select_dtypes(include=['float', 'float32', 'float64'])
+
+        # 선택된 데이터가 비어있으면 원본에서 강제 변환 시도
+        if target_prices.empty:
+             target_prices = prices.apply(pd.to_numeric, errors='coerce')
+
+        if method == 'log':
+            # 로그 수익률: ln(Pt / Pt-1)
+            with np.errstate(divide='ignore', invalid='ignore'):
+                returns = np.log(target_prices / target_prices.shift(1))
+        else:
+            # 단순 수익률: (Pt - Pt-1) / Pt-1
+            returns = target_prices.pct_change()
+        
+        # 무한대(inf)나 NaN 값 제거
+        return returns.replace([np.inf, -np.inf], np.nan).dropna()
 
 class MarketBenchmark:
     """
-    Create market benchmark indices.
+    Load or Create market benchmark indices.
     """
     
     @staticmethod
-    def create_equal_weighted_index(
-        prices: pd.DataFrame,
-        name: str = 'Market'
-    ) -> pd.Series:
+    def load_benchmark_from_file(
+        data_dir: str,
+        exchange: str,
+        frequency: str = "1m"
+    ) -> Optional[pd.Series]:
         """
-        Create equal-weighted market index from asset prices.
-        
-        Args:
-            prices: DataFrame of asset prices
-            name: Name for the index
-        
-        Returns:
-            Series of market index prices
+        Load pre-calculated benchmark from parquet file.
+        Structure: data/benchmark/{exchange}/[upbit_]benchmark_{freq}.parquet
         """
-        # Normalize all prices to start at 100
+        base_path = Path(data_dir) / "benchmark" / exchange
+        
+        # 이미지 기반 파일명 규칙 적용
+        if exchange == 'upbit':
+            filename = f"upbit_benchmark_{frequency}.parquet"
+        else:
+            # binance 및 기본값
+            filename = f"benchmark_{frequency}.parquet"
+            
+        filepath = base_path / filename
+        
+        if not filepath.exists():
+            print(f"⚠️  Benchmark file not found: {filepath}")
+            return None
+            
+        try:
+            print(f"📉 Loading Market Benchmark: {filename}")
+            # Parquet 파일 읽기
+            df = pd.read_parquet(filepath)
+            
+            # 인덱스(날짜) 처리 (CryptoDataLoader와 동일한 로직)
+            if 'datetime' in df.columns:
+                df['datetime'] = pd.to_datetime(df['datetime'])
+                df.set_index('datetime', inplace=True)
+            elif 'timestamp' in df.columns:
+                df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
+                df.set_index('datetime', inplace=True)
+            elif 'open_time' in df.columns:
+                df['datetime'] = pd.to_datetime(df['open_time'], unit='ms')
+                df.set_index('datetime', inplace=True)
+                
+            # 'close' 가격을 벤치마크 지수로 사용 (없으면 첫 번째 컬럼 사용)
+            if 'close' in df.columns:
+                series = df['close']
+            else:
+                series = df.iloc[:, 0]
+                
+            series.name = 'Market'
+            return series
+            
+        except Exception as e:
+            print(f"❌ Error loading benchmark {filepath}: {e}")
+            return None
+
+    # (기존 계산 로직은 백업용으로 남겨두거나 삭제하셔도 됩니다)
+    @staticmethod
+    def create_equal_weighted_index(prices: pd.DataFrame, name: str = 'Market') -> pd.Series:
         normalized = prices / prices.iloc[0] * 100
-        
-        # Equal-weighted average
         index = normalized.mean(axis=1)
         index.name = name
-        
-        return index
-    
-    @staticmethod
-    def create_market_cap_weighted_index(
-        prices: pd.DataFrame,
-        market_caps: Dict[str, float],
-        name: str = 'Market'
-    ) -> pd.Series:
-        """
-        Create market-cap weighted index.
-        
-        Args:
-            prices: DataFrame of asset prices
-            market_caps: Dict of symbol -> market cap
-            name: Name for the index
-        
-        Returns:
-            Series of market index prices
-        """
-        # Get weights
-        total_cap = sum(market_caps.get(s, 0) for s in prices.columns)
-        if total_cap == 0:
-            return MarketBenchmark.create_equal_weighted_index(prices, name)
-        
-        weights = {s: market_caps.get(s, 0) / total_cap for s in prices.columns}
-        
-        # Normalize prices
-        normalized = prices / prices.iloc[0] * 100
-        
-        # Weighted average
-        index = sum(normalized[s] * w for s, w in weights.items() if s in normalized.columns)
-        index.name = name
-        
         return index
 
 
@@ -216,29 +245,7 @@ def prepare_data_for_analysis(
     min_observations: int = 10000
 ) -> Tuple[pd.DataFrame, pd.Series]:
     """
-    Prepare data for Low-Beta Anomaly analysis.
-     
-    This is the main entry point for loading real data.
-     
-    Args:
-        data_dir: Path to data directory
-        exchange: 'binance', 'upbit', or 'equities'
-        symbols: List of symbols (if None, load all available)
-        start_date: Start date (YYYY-MM-DD)
-        end_date: End date (YYYY-MM-DD)
-        min_observations: Minimum observations required per asset
-     
-    Returns:
-        Tuple of (assets_prices DataFrame, market_prices Series)
-     
-    Example:
-        >>> assets_prices, market_prices = prepare_data_for_analysis(
-        ...     data_dir="data",
-        ...     exchange="binance",
-        ...     symbols=['BTCUSDT', 'ETHUSDT', 'BNBUSDT', ...],
-        ...     start_date="2024-01-01",
-        ...     end_date="2024-06-30"
-        ... )
+    Prepare data loading benchmark from file.
     """
     config = DataConfig(
         data_dir=data_dir,
@@ -250,26 +257,21 @@ def prepare_data_for_analysis(
     
     loader = CryptoDataLoader(config)
     
-    # Get available symbols
+    # 1. Load Available Symbols
     available = loader.get_available_symbols()
-    
     if not available:
         raise ValueError(f"No data found in {config.data_dir}/{exchange}")
     
     print(f"📊 Found {len(available)} symbols in {exchange}")
     
-    # Use specified symbols or all available
     if symbols:
         symbols_to_load = [s for s in symbols if s in available]
-        if len(symbols_to_load) < len(symbols):
-            missing = set(symbols) - set(symbols_to_load)
-            print(f"⚠️  Missing symbols: {missing}")
     else:
         symbols_to_load = available
     
-    print(f"📥 Loading {len(symbols_to_load)} symbols...")
+    print(f"📥 Loading {len(symbols_to_load)} asset symbols...")
     
-    # Load prices
+    # 2. Load Asset Prices
     prices = loader.load_multiple_symbols(
         symbols_to_load, 
         start_date, 
@@ -278,17 +280,34 @@ def prepare_data_for_analysis(
     )
     
     if prices.empty:
-        raise ValueError("No data loaded")
-    
+        raise ValueError("No asset data loaded")
+        
     # Filter by minimum observations
     valid_symbols = [col for col in prices.columns if prices[col].notna().sum() >= min_observations]
     prices = prices[valid_symbols]
+    print(f"✅ Loaded assets: {len(valid_symbols)} symbols")
+
+    # 3. Load Market Benchmark from File (수정된 부분)
+    market_prices = MarketBenchmark.load_benchmark_from_file(
+        data_dir=data_dir,
+        exchange=exchange,
+        frequency="1m"
+    )
     
-    print(f"✅ {len(valid_symbols)} symbols with >= {min_observations} observations")
-    print(f"   Date range: {prices.index[0]} to {prices.index[-1]}")
-    print(f"   Total observations: {len(prices):,}")
+    if market_prices is None:
+        raise ValueError(f"Critical: Could not load benchmark file for {exchange}")
+
+    # 4. Align Data (중요: 자산 데이터와 벤치마크 데이터의 날짜를 교집합으로 맞춤)
+    # 벤치마크와 개별 자산의 기간이 다를 수 있으므로 공통된 기간만 남깁니다.
+    common_index = prices.index.intersection(market_prices.index)
     
-    # Create market benchmark (equal-weighted)
-    market_prices = MarketBenchmark.create_equal_weighted_index(prices, 'Market')
+    if len(common_index) == 0:
+        raise ValueError("No overlapping dates between Assets and Benchmark!")
+        
+    prices = prices.loc[common_index]
+    market_prices = market_prices.loc[common_index]
+    
+    print(f"🔗 Aligned Data Range: {prices.index[0]} to {prices.index[-1]}")
+    print(f"   Total Observations: {len(prices):,}")
     
     return prices, market_prices

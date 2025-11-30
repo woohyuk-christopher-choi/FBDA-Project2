@@ -499,32 +499,56 @@ class BacktestEngine:
         end_date: Optional[datetime] = None
     ) -> Dict[str, pd.Series]:
         """
-        Run backtest.
-        
-        Args:
-            assets_prices: DataFrame with asset prices (columns=assets, index=datetime)
-            market_prices: Series with market prices
-            start_date: Backtest start date
-            end_date: Backtest end date
-        
-        Returns:
-            Dict of portfolio_name -> returns series
+        Run backtest with Strict Type Checking.
         """
-        # Align data
+        print("🔍 Data Validation before Backtest...")
+        
+        # -----------------------------------------------------------
+        # [긴급 수정] 데이터 강제 정제 (Data Sanitization)
+        # -----------------------------------------------------------
+        
+        # 1. 자산 데이터: 오직 float 타입만 남김
+        # (include=['number']는 int형 타임스탬프를 포함하므로 사용 금지)
+        assets_prices = assets_prices.select_dtypes(include=['float', 'float16', 'float32', 'float64'])
+        
+        # 2. 시장 데이터: Series든 DataFrame이든 강제로 숫자(float)로 변환
+        if isinstance(market_prices, pd.DataFrame):
+            # DataFrame이면 float 컬럼만 선택 후 첫 번째 컬럼 사용
+            market_prices = market_prices.select_dtypes(include=['float', 'float16', 'float32', 'float64'])
+            if market_prices.empty:
+                raise ValueError("❌ Market data has no float columns! Check benchmark file.")
+            market_prices = market_prices.iloc[:, 0]
+        
+        # Series인 경우 강제로 수치형 변환 (날짜가 들어있으면 NaN으로 변환됨)
+        market_prices = pd.to_numeric(market_prices, errors='coerce').dropna()
+
+        # 데이터가 비어버렸는지 확인
+        if assets_prices.empty:
+            raise ValueError("❌ Asset prices are empty after filtering for float types.")
+        if market_prices.empty:
+            raise ValueError("❌ Market prices are empty after filtering for float types (Maybe it loaded Date column?).")
+
+        print("✅ Data Validation Passed: All data is numeric.")
+
+        # -----------------------------------------------------------
+        # 기존 로직 진행
+        # -----------------------------------------------------------
+
+        # 1. Align data
         common_idx = assets_prices.index.intersection(market_prices.index)
         assets_prices = assets_prices.loc[common_idx]
         market_prices = market_prices.loc[common_idx]
         
-        # Calculate returns
+        # 2. Calculate returns
         assets_returns = assets_prices.pct_change().dropna()
         market_returns = market_prices.pct_change().dropna()
         
-        # Align after returns calculation
+        # 3. Align after returns calculation
         common_idx = assets_returns.index.intersection(market_returns.index)
         assets_returns = assets_returns.loc[common_idx]
         market_returns = market_returns.loc[common_idx]
         
-        # Filter dates
+        # 4. Filter dates
         if start_date:
             mask = assets_returns.index >= start_date
             assets_returns = assets_returns.loc[mask]
@@ -534,7 +558,7 @@ class BacktestEngine:
             assets_returns = assets_returns.loc[mask]
             market_returns = market_returns.loc[mask]
         
-        # Determine rebalance dates
+        # 5. Determine rebalance dates
         rebalance_dates = self._get_rebalance_dates(assets_returns.index)
         
         print(f"📊 Backtest: {len(rebalance_dates)} rebalance periods")
@@ -542,22 +566,27 @@ class BacktestEngine:
         print(f"   Date range: {assets_returns.index[0]} to {assets_returns.index[-1]}")
         
         # Initialize
-        # Dynamically create portfolio return trackers based on n_portfolios
         portfolio_returns = {'Market': []}
         
         if self.portfolio_constructor.n_portfolios == 4:
-            for name in ['Low_Beta', 'MidLow_Beta', 'MidHigh_Beta', 'High_Beta', 'BAB']:
-                portfolio_returns[name] = []
+            names = ['Low_Beta', 'MidLow_Beta', 'MidHigh_Beta', 'High_Beta', 'BAB']
         elif self.portfolio_constructor.n_portfolios == 5:
-            for name in ['Low_Beta', 'Q2', 'Q3', 'Q4', 'High_Beta', 'BAB']:
-                portfolio_returns[name] = []
+            names = ['Low_Beta', 'Q2', 'Q3', 'Q4', 'High_Beta', 'BAB']
+        elif self.portfolio_constructor.n_portfolios == 10:
+            names = [f"D{i+1}" for i in range(10)] + ['BAB']
+            names[0] = "Low_Beta"
+            names[9] = "High_Beta"
         else:
-            portfolio_returns['Low_Beta'] = []
-            portfolio_returns['High_Beta'] = []
-            portfolio_returns['BAB'] = []
+            names = [f"P{i+1}" for i in range(self.portfolio_constructor.n_portfolios)] + ['BAB']
+            names[0] = "Low_Beta"
+            names[-2] = "High_Beta"
+            
+        for name in names:
+            portfolio_returns[name] = []
         
-        current_weights = None
-        
+        # ---------------------------------------------------------------------
+        # Rolling Window Loop
+        # ---------------------------------------------------------------------
         for i, rebal_date in enumerate(rebalance_dates[:-1]):
             next_rebal_date = rebalance_dates[i + 1]
             
@@ -574,8 +603,12 @@ class BacktestEngine:
             
             # Estimate betas
             assets_dict = {col: est_assets[col].values for col in est_assets.columns}
+            
+            # Market returns handling (Series or Array)
+            market_values = est_market.values
+            
             beta_results = self.beta_estimator.estimate_all_betas(
-                assets_dict, est_market.values
+                assets_dict, market_values
             )
             
             betas = {k: v[0] for k, v in beta_results.items()}
@@ -598,7 +631,7 @@ class BacktestEngine:
             if len(hold_assets) == 0:
                 continue
             
-            # Portfolio returns - track ALL portfolios dynamically
+            # Track Portfolio Returns
             for port_name, port in portfolios.items():
                 if port_name not in portfolio_returns:
                     portfolio_returns[port_name] = []
@@ -607,13 +640,13 @@ class BacktestEngine:
                 
                 for asset, weight in port.weights.items():
                     if asset in hold_assets.columns:
-                        asset_ret = (1 + hold_assets[asset]).prod() - 1
-                        port_ret += weight * asset_ret
+                        asset_period_ret = (1 + hold_assets[asset]).prod() - 1
+                        port_ret += weight * asset_period_ret
                 
                 portfolio_returns[port_name].append({
                     'date': next_rebal_date,
                     'return': port_ret,
-                    'avg_beta': np.mean(list(port.betas.values()))
+                    'avg_beta': np.mean(list(port.betas.values())) if port.betas else 0
                 })
             
             # Market return
@@ -638,6 +671,7 @@ class BacktestEngine:
         
         return results
     
+        
     def _get_rebalance_dates(self, index: pd.DatetimeIndex) -> List[datetime]:
         """Get rebalance dates based on frequency."""
         if self.rebalance_frequency == 'daily':
@@ -915,7 +949,7 @@ def run_demo():
     backtest_engine = BacktestEngine(
         beta_estimator=beta_estimator,
         portfolio_constructor=portfolio_constructor,
-        rebalance_frequency='monthly',
+        rebalance_frequency='weekly',
         transaction_cost=0
     )
     
@@ -968,7 +1002,7 @@ def run_real_data_analysis(
     end_date: Optional[str] = None,
     use_tarv: bool = True,
     n_portfolios: int = 5,
-    rebalance_frequency: str = 'weekly',
+    rebalance_frequency: str = 'monthly',
     window_days: int = 20,
     min_observations: int = 5000
 ) -> Dict[str, pd.DataFrame]:

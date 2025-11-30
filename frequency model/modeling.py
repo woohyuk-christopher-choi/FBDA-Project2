@@ -8,7 +8,7 @@ def run_analysis_for_exchange(
     start_date: Optional[str], 
     end_date: Optional[str],
     use_tarv: bool = True,
-    n_portfolios: int = 5,
+    n_portfolios: int = 3,
     window_days: int = 30,
     min_observations: int = 10000
 ):
