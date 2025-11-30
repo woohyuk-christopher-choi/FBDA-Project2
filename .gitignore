@@ -1,5 +1,6 @@
 # Data director
 /file
+/data
 
 # Python
 __pycache__/
