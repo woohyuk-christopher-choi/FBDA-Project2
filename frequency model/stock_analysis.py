@@ -245,8 +245,7 @@ def main(fast_mode: bool = True):
     
     print("\n" + "=" * 70)
     print("🔬 S&P500 STOCK ANALYSIS: LOW-BETA ANOMALY TEST")
-    if fast_mode:
-        print("   ⚡ FAST MODE: Skipping 1min frequency")
+    
     print("=" * 70)
     
     # Load data
@@ -256,7 +255,7 @@ def main(fast_mode: bool = True):
     # Test different frequencies (same as crypto analysis)
     # Note: 1h = 60min, but stock market has only ~6.5 hours/day
     if fast_mode:
-        frequencies = ['5min', '15min', '30min', '1h', '1d']  # Skip 1min (too slow)
+        frequencies = ['1min', '5min', '15min', '30min', '1h', '1d']
     else:
         frequencies = ['1min', '5min', '15min', '30min', '1h', '1d']
     
