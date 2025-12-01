@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 import warnings
 
-from tarv import calculate_realized_beta
+from tarv import calculate_realized_beta, estimate_universal_alpha
 
 
 # =============================================================================
@@ -56,22 +56,43 @@ class BetaEstimator:
     
     def __init__(
         self,
-        window_minutes: int = 1440 * 30,
+        window_observations: int = 1440 * 30,  # Number of observations (not minutes)
         min_observations: int = 1000,
         use_tarv: bool = True,
         c_omega: float = 0.333,
-        verbose: bool = False
+        verbose: bool = False,
+        use_rolling_alpha: bool = False  # If True, estimate alpha from window data
     ):
-        self.window_minutes = window_minutes
+        self.window_observations = window_observations  # Renamed from window_minutes
         self.min_observations = min_observations
         self.use_tarv = use_tarv
         self.c_omega = c_omega
         self.verbose = verbose
+        self.use_rolling_alpha = use_rolling_alpha
+        self._current_alpha = None  # Store current window's alpha
+    
+    def estimate_rolling_alpha(
+        self,
+        assets_data: Dict[str, np.ndarray],
+        market_returns: np.ndarray
+    ) -> float:
+        """Estimate universal alpha from current window data (no look-ahead)."""
+        all_returns = list(assets_data.values()) + [market_returns]
+        K = max(2, int(self.c_omega * np.sqrt(len(market_returns))))
+        
+        universal_alpha, info = estimate_universal_alpha(all_returns, K=K, method='median')
+        self._current_alpha = universal_alpha
+        
+        if self.verbose:
+            print(f"   Rolling α = {universal_alpha:.4f}")
+        
+        return universal_alpha
     
     def estimate_beta(
         self,
         asset_returns: np.ndarray,
-        market_returns: np.ndarray
+        market_returns: np.ndarray,
+        universal_alpha: float = None
     ) -> Tuple[float, Dict]:
         """Estimate beta for a single asset."""
         # Remove NaN values
@@ -86,19 +107,24 @@ class BetaEstimator:
         
         K = max(2, int(self.c_omega * np.sqrt(n)))
         
+        # Use provided alpha, or current rolling alpha, or None (individual)
+        alpha_to_use = universal_alpha if universal_alpha is not None else self._current_alpha
+        
         if self.use_tarv:
             beta, info = calculate_realized_beta(
                 asset_returns=asset_returns,
                 market_returns=market_returns,
                 K=K,
                 p=2,
-                use_tarv=True
+                use_tarv=True,
+                universal_alpha=alpha_to_use
             )
             diagnostics = {
                 'method': 'TARV',
                 'K': K,
                 'truncation_rate': info.get('var_truncation_rate', np.nan),
-                'tail_alpha': info.get('var_alpha', np.nan)
+                'tail_alpha': info.get('var_alpha', np.nan),
+                'universal_alpha_used': alpha_to_use
             }
         else:
             cov = np.sum(asset_returns * market_returns)
@@ -111,12 +137,18 @@ class BetaEstimator:
     def estimate_all_betas(
         self,
         assets_data: Dict[str, np.ndarray],
-        market_returns: np.ndarray
+        market_returns: np.ndarray,
+        universal_alpha: float = None
     ) -> Dict[str, Tuple[float, Dict]]:
         """Estimate betas for all assets."""
         results = {}
+        
+        # If using rolling alpha and no alpha provided, estimate from current window
+        if self.use_rolling_alpha and universal_alpha is None and self.use_tarv:
+            universal_alpha = self.estimate_rolling_alpha(assets_data, market_returns)
+        
         for asset_id, asset_returns in assets_data.items():
-            beta, diag = self.estimate_beta(asset_returns, market_returns)
+            beta, diag = self.estimate_beta(asset_returns, market_returns, universal_alpha)
             results[asset_id] = (beta, diag)
             if self.verbose:
                 print(f"  {asset_id}: β = {beta:.4f}")
@@ -296,13 +328,18 @@ class BacktestEngine:
         for i, rebal_date in enumerate(rebalance_dates[:-1]):
             next_rebal_date = rebalance_dates[i + 1]
             
-            # Estimation window
-            est_end = rebal_date
-            est_start = est_end - timedelta(minutes=self.beta_estimator.window_minutes)
+            # Estimation window: use observation count, not time delta
+            # Find index position of rebal_date
+            rebal_idx = assets_returns.index.get_indexer([rebal_date], method='ffill')[0]
+            if rebal_idx < 0:
+                rebal_idx = assets_returns.index.searchsorted(rebal_date)
             
-            est_mask = (assets_returns.index >= est_start) & (assets_returns.index <= est_end)
-            est_assets = assets_returns.loc[est_mask]
-            est_market = market_returns.loc[est_mask]
+            # Get window by observation count
+            window_size = self.beta_estimator.window_observations
+            start_idx = max(0, rebal_idx - window_size + 1)
+            
+            est_assets = assets_returns.iloc[start_idx:rebal_idx + 1]
+            est_market = market_returns.iloc[start_idx:rebal_idx + 1]
             
             if len(est_assets) < self.beta_estimator.min_observations:
                 continue
@@ -518,7 +555,7 @@ def run_real_data_analysis(
     
     # Initialize components
     beta_estimator = BetaEstimator(
-        window_minutes=minutes_per_day * window_days,
+        window_observations=minutes_per_day * window_days,
         min_observations=min_observations,
         use_tarv=use_tarv,
         c_omega=0.333

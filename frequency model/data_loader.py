@@ -197,13 +197,26 @@ class MarketBenchmark:
             return None
 
 
+# Frequency to minutes per observation mapping
+FREQUENCY_MINUTES = {
+    '1m': 1,
+    '5m': 5,
+    '15m': 15,
+    '30m': 30,
+    '1h': 60,
+    '4h': 240,
+    '1d': 1440,
+}
+
+
 def prepare_data_for_analysis(
     data_dir: str = "data",
     exchange: str = "binance",
     symbols: Optional[List[str]] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    min_observations: int = 10000
+    min_observations: int = 10000,
+    frequency: str = "1m"
 ) -> Tuple[pd.DataFrame, pd.Series]:
     """
     Prepare asset prices and market benchmark for analysis.
@@ -215,6 +228,7 @@ def prepare_data_for_analysis(
         start_date: Start date (YYYY-MM-DD)
         end_date: End date (YYYY-MM-DD)
         min_observations: Minimum observations required per asset
+        frequency: Data frequency ('1m', '5m', '15m', '30m', '1h', '1d')
     
     Returns:
         Tuple of (assets_prices DataFrame, market_prices Series)
@@ -222,7 +236,7 @@ def prepare_data_for_analysis(
     config = DataConfig(
         data_dir=data_dir,
         exchange=exchange,
-        frequency="1m",
+        frequency=frequency,
         start_date=start_date,
         end_date=end_date
     )
@@ -265,7 +279,7 @@ def prepare_data_for_analysis(
     market_prices = MarketBenchmark.load_benchmark_from_file(
         data_dir=data_dir,
         exchange=exchange,
-        frequency="1m"
+        frequency=frequency
     )
     
     if market_prices is None:
@@ -282,5 +296,6 @@ def prepare_data_for_analysis(
     
     print(f"🔗 Aligned Data Range: {prices.index[0]} to {prices.index[-1]}")
     print(f"   Total Observations: {len(prices):,}")
+    print(f"   Frequency: {frequency} ({FREQUENCY_MINUTES.get(frequency, 1)} min/obs)")
     
     return prices, market_prices
