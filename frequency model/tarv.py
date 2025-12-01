@@ -1,35 +1,24 @@
 #!/usr/bin/env python3
 """
-Tail-Adaptive Realized Volatility (TARV) - Full Implementation
+Tail-Adaptive Realized Volatility (TARV) Implementation
 Based on Shin, Kim, & Fan (2023) - "Adaptive robust large volatility matrix estimation"
 Journal of Econometrics, 237(1), 105514
 
 TERMINOLOGY NOTE:
 ================
-This module uses "alpha" to refer to the TAIL INDEX (tail_alpha):
-- Measures the heaviness of return distribution tails
-- Higher values = lighter tails (closer to Gaussian)
-- Lower values = heavier tails (more extreme events)
-- Used in truncation threshold calculation
+- "alpha" refers to the TAIL INDEX (tail_alpha): Measures tail heaviness
+- Higher alpha = lighter tails (closer to Gaussian)
+- Lower alpha = heavier tails (more extreme events)
+- This is DIFFERENT from Jensen's alpha in CAPM
 
-This is DIFFERENT from "Jensen's alpha" in CAPM:
-- Jensen's alpha = abnormal return not explained by market beta
-- That alpha is computed in portfolio.py as portfolio performance
-
-Throughout this module:
-- "alpha" refers to tail_alpha (tail index)
-- "universal_alpha" refers to a cross-market tail index
-
-This implementation follows the paper's methodology exactly:
+Implementation follows:
 1. Pre-averaging of high-frequency returns
-2. Median-centered truncation
-3. Extended Hill estimator for tail index
-4. Adaptive threshold (Eq. 5.17)
-5. Truncated realized covariance matrix
+2. Extended Hill estimator for tail index
+3. Adaptive threshold (Eq. 5.17)
+4. Median-centered truncation
 """
 
 import numpy as np
-import polars as pl
 from typing import Union, Optional, Tuple, List
 from dataclasses import dataclass
 
@@ -219,7 +208,8 @@ def estimate_tail_index(
     n = len(Q)
     
     if n < 10:
-        raise ValueError(f"Not enough observations: {n} < 10")
+        # Not enough data - return default alpha
+        return TailIndexResult(alpha=alpha_min, k=0, omega=0, n=n)
     
     # Use median-centered values for tail estimation (more robust)
     if use_median_centered:
@@ -947,35 +937,6 @@ def estimate_universal_alpha_from_Q(
 # =============================================================================
 # 7. Helper Functions
 # =============================================================================
-
-def calculate_log_returns(
-    df: pl.DataFrame,
-    price_col: str = 'close',
-    sort_col: str = 'timestamp'
-) -> pl.DataFrame:
-    """
-    Calculate log returns from price data (Polars DataFrame).
-    
-    Args:
-        df: Polars DataFrame with price data
-        price_col: Column name for price
-        sort_col: Column name for sorting
-    
-    Returns:
-        DataFrame with 'log_return' column added
-    """
-    if price_col not in df.columns:
-        raise ValueError(f"Column '{price_col}' not found")
-    
-    if sort_col in df.columns:
-        df = df.sort(sort_col)
-    
-    df = df.with_columns([
-        (pl.col(price_col).log() - pl.col(price_col).log().shift(1)).alias('log_return')
-    ])
-    
-    return df
-
 
 def optimal_K(n: int, method: str = 'sqrt') -> int:
     """
