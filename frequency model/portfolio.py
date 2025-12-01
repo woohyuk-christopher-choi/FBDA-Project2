@@ -153,6 +153,36 @@ class BetaEstimator:
             if self.verbose:
                 print(f"  {asset_id}: β = {beta:.4f}")
         return results
+    
+    def estimate_all_betas_fast(
+        self,
+        assets_df: pd.DataFrame,
+        market_returns: np.ndarray
+    ) -> Dict[str, Tuple[float, Dict]]:
+        """
+        Fast vectorized beta estimation for all assets.
+        Uses Standard RV only (no TARV) for speed.
+        """
+        results = {}
+        
+        # Convert to numpy for speed
+        assets_matrix = assets_df.values  # (n_obs, n_assets)
+        market = market_returns.reshape(-1, 1)  # (n_obs, 1)
+        
+        # Vectorized covariance and variance
+        # cov(asset, market) = sum(asset * market)
+        # var(market) = sum(market^2)
+        cov_matrix = np.nansum(assets_matrix * market, axis=0)  # (n_assets,)
+        var_market = np.nansum(market ** 2)
+        
+        # Betas = cov / var
+        betas = cov_matrix / var_market if var_market != 0 else np.full(len(cov_matrix), np.nan)
+        
+        # Create results dict
+        for i, col in enumerate(assets_df.columns):
+            results[col] = (betas[i], {'method': 'Standard_Fast'})
+        
+        return results
 
 
 # =============================================================================
