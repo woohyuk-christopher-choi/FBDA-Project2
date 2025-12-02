@@ -6,11 +6,12 @@ authors = ["Your Name <you@example.com>"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = "^3.8"
+python = "^3.10"
 requests = "^2.31.0"
 polars = "^0.20.0"
 pyarrow = "^14.0.0"
 rich = "^13.7.0"
+arch = "^8.0.0"
 
 [build-system]
 requires = ["poetry-core"]
