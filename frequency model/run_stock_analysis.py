@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 =============================================================================
 S&P500 STOCK LOW-BETA ANOMALY ANALYSIS
@@ -44,7 +45,7 @@ import pandas as pd
 # Add current directory to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from stock_data_loader import load_sp500_data, resample_to_frequency
+from stock_data_loader import load_preprocessed_data, STOCK_FREQUENCY_MINUTES
 from tarv import (
     calculate_realized_beta,
     calculate_realized_beta_truncate_first,
@@ -62,6 +63,7 @@ STOCK_MINUTES_PER_DAY = 390
 
 # Frequency mapping for US stock market
 STOCK_FREQUENCY_MINUTES = {
+    '1min': 1,
     '5min': 5,
     '15min': 15,
     '30min': 30,
@@ -69,23 +71,48 @@ STOCK_FREQUENCY_MINUTES = {
     '1d': 390
 }
 
+# =============================================================================
+# CONFIGURATION - Following Hollstein et al. (2020) & Frazzini & Pedersen (2014)
+# =============================================================================
+
 CONFIG = {
-    'frequencies': ['5min', '15min', '30min', '1h', '1d'],
-    'window_days': {
-        '5min': 30,
-        '15min': 30,
-        '30min': 30,
-        '1h': 30,
-        '1d': 120
+    # Include 1min to test if TARV can handle microstructure noise
+    'frequencies': ['1min', '5min', '15min', '30min', '1h', '1d'],
+    
+    # Hollstein et al. (2020): HF uses 6 months, Daily uses 12 months
+    'window_months': {
+        '1min': 6,    # High-frequency: 6 months
+        '5min': 6,
+        '15min': 6,
+        '30min': 6,   # Optimal in Hollstein et al.
+        '1h': 6,
+        '1d': 12      # Daily: 12 months (historical approach)
     },
-    'holding_period_days': 7,
+    
+    # Convert to trading days (approx 21 days/month)
+    'window_days': {
+        '1min': 126,   # 6 months * 21 days
+        '5min': 126,
+        '15min': 126,
+        '30min': 126,
+        '1h': 126,
+        '1d': 252      # 12 months * 21 days
+    },
+    
+    # Frazzini & Pedersen (2014) methodology
+    'rebalancing': 'monthly',
+    'beta_shrinkage': 0.6,     # β_shrunk = 0.6 × β + 0.4 × 1.0
+    'n_portfolios': 5,         # Quintile portfolios (5 groups for ~500 stocks)
+    
     'min_observations': {
+        '1min': 10000,   # 1min has most observations
         '5min': 5000,
         '15min': 2000,
         '30min': 1000,
         '1h': 500,
-        '1d': 50
+        '1d': 100
     },
+    
     'methods': {
         'TARV_Ind': 'TARV Individual α',
         'TARV_Roll': 'TARV Rolling α',
@@ -97,40 +124,89 @@ CONFIG = {
 }
 
 
+def calculate_realized_beta_next_period(
+    asset_returns: np.ndarray,
+    market_returns: np.ndarray
+) -> float:
+    """
+    Calculate realized beta for the next period (ground truth for prediction).
+    Simple OLS: β = Cov(r_i, r_m) / Var(r_m)
+    """
+    valid_mask = ~(np.isnan(asset_returns) | np.isnan(market_returns))
+    asset_clean = asset_returns[valid_mask]
+    market_clean = market_returns[valid_mask]
+    
+    if len(asset_clean) < 10:
+        return np.nan
+    
+    cov = np.cov(asset_clean, market_clean)[0, 1]
+    var = np.var(market_clean, ddof=1)
+    
+    if var == 0:
+        return np.nan
+    
+    return cov / var
+
+
+def apply_beta_shrinkage(beta: float, shrinkage: float = 0.6) -> float:
+    """
+    Apply Vasicek shrinkage to beta following Frazzini & Pedersen (2014).
+    
+    β_shrunk = shrinkage × β_raw + (1 - shrinkage) × 1.0
+    
+    This shrinks extreme betas toward 1.0.
+    """
+    if np.isnan(beta) or np.isinf(beta):
+        return np.nan
+    return shrinkage * beta + (1 - shrinkage) * 1.0
+
+
+def calculate_bab_return(
+    low_beta_return: float,
+    high_beta_return: float,
+    low_beta_avg: float,
+    high_beta_avg: float,
+    rf: float = 0.0
+) -> float:
+    """
+    Calculate BAB return following Frazzini & Pedersen (2014).
+    
+    BAB = (1/β_L) × (R_L - rf) - (1/β_H) × (R_H - rf)
+    
+    This leverages low-beta portfolio and deleverages high-beta portfolio
+    to create a zero-beta, zero-investment strategy.
+    """
+    if low_beta_avg <= 0 or high_beta_avg <= 0:
+        return low_beta_return - high_beta_return  # Fallback to simple BAB
+    
+    levered_low = (1.0 / low_beta_avg) * (low_beta_return - rf)
+    levered_high = (1.0 / high_beta_avg) * (high_beta_return - rf)
+    
+    return levered_low - levered_high
+
+
 # =============================================================================
 # DATA LOADING FUNCTIONS
 # =============================================================================
 
 def load_stock_data_for_frequency(
-    data_file: Path,
+    data_dir: Path,
     frequency: str
 ) -> tuple:
     """
-    Load and resample S&P500 data for a specific frequency.
+    Load preprocessed S&P500 data for a specific frequency.
     
     Args:
-        data_file: Path to Excel data file
+        data_dir: Path to data directory
         frequency: Target frequency ('5min', '15min', '30min', '1h', '1d')
     
     Returns:
         Tuple of (stock_prices, market_prices)
     """
-    # Load raw data
-    stock_prices, market_prices = load_sp500_data(str(data_file))
+    # Load preprocessed data
+    stock_prices, market_prices = load_preprocessed_data(str(data_dir), frequency)
     
-    # Resample to target frequency
-    stock_resampled = resample_to_frequency(stock_prices, frequency)
-    market_resampled = resample_to_frequency(
-        market_prices.to_frame(), 
-        frequency
-    ).iloc[:, 0]
-    
-    # Align indices
-    common_idx = stock_resampled.index.intersection(market_resampled.index)
-    stock_resampled = stock_resampled.loc[common_idx]
-    market_resampled = market_resampled.loc[common_idx]
-    
-    return stock_resampled, market_resampled
+    return stock_prices, market_prices
 
 
 # =============================================================================
@@ -139,31 +215,40 @@ def load_stock_data_for_frequency(
 
 def analyze_single_frequency(
     frequency: str,
-    data_file: Path
-) -> pd.DataFrame:
+    data_dir: Path
+) -> tuple:
     """
     Analyze all 6 methods for a single frequency.
     
-    Returns DataFrame with columns:
-        Frequency, Method, Portfolio, Total_Return, Avg_Period_Return, N_Periods
+    Following Hollstein et al. (2020) & Frazzini & Pedersen (2014):
+    - Beta prediction accuracy (RMSE)
+    - Monthly rebalancing
+    - Beta shrinkage: β_shrunk = 0.6 × β + 0.4 × 1.0
+    - Decile portfolios (10 groups)
+    - BAB with leverage adjustment: (1/β_L) × R_L - (1/β_H) × R_H
+    
+    Returns:
+        Tuple of (portfolio_results_df, prediction_results_df)
     """
     print(f"\n{'='*60}")
-    print(f"📊 Analyzing Frequency: {frequency}")
+    print(f"Analyzing Frequency: {frequency}")
     print('='*60)
     
-    # Get config
-    window_days = CONFIG['window_days'].get(frequency, 30)
-    holding_days = CONFIG['holding_period_days']
+    # Get config - Hollstein et al. (2020) window sizes
+    window_days = CONFIG['window_days'].get(frequency, 126)
+    window_months = CONFIG['window_months'].get(frequency, 6)
+    n_portfolios = CONFIG['n_portfolios']
+    beta_shrinkage = CONFIG['beta_shrinkage']
     
     # Load data
-    print("📥 Loading data...")
+    print("Loading data...")
     try:
-        stock_prices, market_prices = load_stock_data_for_frequency(data_file, frequency)
+        stock_prices, market_prices = load_stock_data_for_frequency(data_dir, frequency)
     except Exception as e:
-        print(f"❌ Error loading data: {e}")
+        print(f"Error loading data: {e}")
         import traceback
         traceback.print_exc()
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
     
     # Calculate returns
     stock_returns = stock_prices.pct_change().dropna()
@@ -180,17 +265,19 @@ def analyze_single_frequency(
     print(f"   Stocks: {n_stocks}")
     print(f"   Observations: {n_obs:,}")
     print(f"   Date Range: {stock_returns.index[0]} to {stock_returns.index[-1]}")
+    print(f"   Window: {window_months} months ({window_days} days) - Hollstein et al. (2020)")
+    print(f"   Beta Shrinkage: {beta_shrinkage} (Vasicek)")
+    print(f"   Portfolios: {n_portfolios} (Quintile)")
     
     # Check minimum observations
     min_obs = CONFIG['min_observations'].get(frequency, 1000)
     if n_obs < min_obs:
-        print(f"⚠️ Not enough observations ({n_obs} < {min_obs})")
+        print(f"[WARNING] Not enough observations ({n_obs} < {min_obs})")
     
     # Calculate window sizes (US market: 390 min/day)
     freq_minutes = STOCK_FREQUENCY_MINUTES.get(frequency, 1)
     obs_per_day = STOCK_MINUTES_PER_DAY // freq_minutes
     window_obs = obs_per_day * window_days
-    hold_obs = obs_per_day * holding_days
     
     # For daily data, ensure K >= 3
     if frequency == '1d':
@@ -201,29 +288,34 @@ def analyze_single_frequency(
         min_asset_obs = 50
     
     print(f"   Window: {window_days} days ({window_obs:,} obs)")
-    print(f"   Hold: {holding_days} days ({hold_obs:,} obs)")
+    print(f"   Rebalancing: Monthly (following paper)")
     print(f"   K (approx): {K_base}")
     
-    # Get rebalance points (weekly on Monday)
+    # Get rebalance points - MONTHLY (following Frazzini & Pedersen 2014)
     rebalance_dates = pd.date_range(
         start=stock_returns.index[0],
         end=stock_returns.index[-1],
-        freq='W-MON'
+        freq='MS'  # Month Start - monthly rebalancing
     )
     
-    # Results storage
+    # Results storage - Quintile portfolios (Q1=Low Beta to Q5=High Beta)
     methods = CONFIG['methods']
-    all_results = {m: {p: [] for p in ['Low_Beta', 'Q2', 'Q3', 'Q4', 'High_Beta', 'BAB', 'Market']}
-                   for m in methods.keys()}
+    port_names = ['Q1_Low', 'Q2', 'Q3', 'Q4', 'Q5_High', 'BAB', 'Market']
+    all_results = {m: {p: [] for p in port_names} for m in methods.keys()}
     
-    # Store all betas for later analysis
-    all_betas = {m: [] for m in methods.keys()}
+    # Store average betas for each portfolio (for leverage adjustment)
+    port_betas = {m: {p: [] for p in port_names} for m in methods.keys()}
+    
+    # Beta prediction tracking (Hollstein et al. 2020)
+    # Store (predicted_beta, realized_beta) pairs for each method
+    beta_predictions = {m: {'predicted': [], 'realized': []} for m in methods.keys()}
     
     # Process each rebalance period
     n_periods = 0
     min_obs_required = max(20, int(window_obs * 0.3))
     
-    print(f"\n🔄 Processing rebalance periods...")
+    print("\n[PROCESSING] Rebalance periods (Monthly)...")
+    print("   Measuring beta prediction accuracy (Hollstein et al. 2020)...")
     
     for i in range(len(rebalance_dates) - 1):
         rebal_date = rebalance_dates[i]
@@ -299,8 +391,30 @@ def analyze_single_frequency(
                     continue
             
             method_betas[method_key] = betas
-            if betas:
-                all_betas[method_key].append(betas)
+        
+        # Calculate realized betas for NEXT period (ground truth for prediction)
+        # This is the key addition from Hollstein et al. (2020)
+        next_hold_mask = (stock_returns.index > rebal_date) & (stock_returns.index <= next_rebal)
+        if next_hold_mask.sum() < 10:
+            continue
+            
+        next_returns = stock_returns.loc[next_hold_mask]
+        next_market = market_returns.loc[next_hold_mask].values
+        
+        # Calculate realized beta for each asset in the next period
+        realized_betas_next = {}
+        for col in next_returns.columns:
+            next_asset = next_returns[col].values
+            realized_beta = calculate_realized_beta_next_period(next_asset, next_market)
+            if not np.isnan(realized_beta):
+                realized_betas_next[col] = realized_beta
+        
+        # Store prediction pairs for RMSE calculation
+        for method_key, pred_betas in method_betas.items():
+            for asset, pred_beta in pred_betas.items():
+                if asset in realized_betas_next:
+                    beta_predictions[method_key]['predicted'].append(pred_beta)
+                    beta_predictions[method_key]['realized'].append(realized_betas_next[asset])
         
         # Construct portfolios for each method
         hold_mask = (stock_returns.index > rebal_date) & (stock_returns.index <= next_rebal)
@@ -316,126 +430,194 @@ def analyze_single_frequency(
         n_periods += 1
         
         for method_key, betas in method_betas.items():
-            if len(betas) < 5:
+            if len(betas) < n_portfolios:  # Need at least n_portfolios assets
                 continue
             
-            # Sort by beta
-            sorted_assets = sorted(betas.items(), key=lambda x: x[1])
-            n_assets_port = len(sorted_assets)
-            per_port = n_assets_port // 5
+            # Apply beta shrinkage (Vasicek): β_shrunk = 0.6 × β + 0.4 × 1
+            shrunk_betas = {k: apply_beta_shrinkage(v, beta_shrinkage) for k, v in betas.items()}
+            shrunk_betas = {k: v for k, v in shrunk_betas.items() if not np.isnan(v)}
             
-            port_names = ['Low_Beta', 'Q2', 'Q3', 'Q4', 'High_Beta']
-            port_returns = {}
+            if len(shrunk_betas) < n_portfolios:
+                continue
             
-            for j, port_name in enumerate(port_names):
+            # Sort by shrunk beta
+            sorted_assets = sorted(shrunk_betas.items(), key=lambda x: x[1])
+            n_assets_total = len(sorted_assets)
+            per_port = n_assets_total // n_portfolios
+            
+            # Quintile portfolio names (5 groups)
+            quintile_names = ['Q1_Low', 'Q2', 'Q3', 'Q4', 'Q5_High']
+            port_returns_dict = {}
+            port_avg_betas = {}
+            
+            for j, port_name in enumerate(quintile_names):
                 start = j * per_port
-                end = n_assets_port if j == 4 else (j + 1) * per_port
-                port_assets = [a for a, _ in sorted_assets[start:end]]
+                end = n_assets_total if j == 4 else (j + 1) * per_port
+                port_assets = [(a, b) for a, b in sorted_assets[start:end]]
                 
+                if len(port_assets) == 0:
+                    continue
+                
+                # Equal weight within portfolio
                 weight = 1.0 / len(port_assets)
                 port_ret = 0
+                port_beta_sum = 0
                 valid_count = 0
-                for asset in port_assets:
+                
+                for asset, beta in port_assets:
                     if asset in period_returns.index:
                         r = period_returns[asset]
                         if not np.isnan(r):
                             port_ret += weight * r
+                            port_beta_sum += beta
                             valid_count += 1
                 
                 if valid_count > 0:
                     port_ret = port_ret * len(port_assets) / valid_count
+                    avg_beta = port_beta_sum / valid_count
+                else:
+                    avg_beta = 1.0
                 
-                port_returns[port_name] = port_ret
+                port_returns_dict[port_name] = port_ret
+                port_avg_betas[port_name] = avg_beta
                 all_results[method_key][port_name].append(port_ret)
+                port_betas[method_key][port_name].append(avg_beta)
             
-            # BAB = Low_Beta - High_Beta
-            bab_ret = port_returns['Low_Beta'] - port_returns['High_Beta']
+            # BAB with leverage adjustment (Frazzini & Pedersen 2014)
+            # BAB = (1/β_L) × R_L - (1/β_H) × R_H
+            low_ret = port_returns_dict.get('Q1_Low', 0)
+            high_ret = port_returns_dict.get('Q5_High', 0)
+            low_beta = port_avg_betas.get('Q1_Low', 1.0)
+            high_beta = port_avg_betas.get('Q5_High', 1.0)
+            
+            bab_ret = calculate_bab_return(low_ret, high_ret, low_beta, high_beta)
             all_results[method_key]['BAB'].append(bab_ret)
             all_results[method_key]['Market'].append(market_ret)
     
-    print(f"   ✅ Processed {n_periods} rebalance periods")
+    print(f"   [OK] Processed {n_periods} rebalance periods (Monthly)")
     
-    # Aggregate results into DataFrame
+    # Calculate Beta Prediction RMSE (Hollstein et al. 2020)
+    print("\n   [RMSE] Beta Prediction Accuracy:")
+    prediction_results = []
+    
+    for method_key, method_name in methods.items():
+        preds = np.array(beta_predictions[method_key]['predicted'])
+        reals = np.array(beta_predictions[method_key]['realized'])
+        
+        if len(preds) > 10:
+            rmse = np.sqrt(np.mean((preds - reals) ** 2))
+            mae = np.mean(np.abs(preds - reals))
+            corr = np.corrcoef(preds, reals)[0, 1]
+            n_pairs = len(preds)
+        else:
+            rmse = mae = corr = np.nan
+            n_pairs = len(preds)
+        
+        prediction_results.append({
+            'Frequency': frequency,
+            'Method': method_key,
+            'Method_Name': method_name,
+            'RMSE': rmse,
+            'MAE': mae,
+            'Correlation': corr,
+            'N_Predictions': n_pairs
+        })
+        
+        if not np.isnan(rmse):
+            print(f"      {method_name}: RMSE={rmse:.4f}, Corr={corr:.4f}")
+    
+    # Aggregate portfolio results into DataFrame
     results_list = []
     
     for method_key, method_name in methods.items():
-        for port_name in ['Low_Beta', 'Q2', 'Q3', 'Q4', 'High_Beta', 'BAB', 'Market']:
-            returns_list = all_results[method_key][port_name]
+        for pname in port_names:
+            returns_list = all_results[method_key][pname]
             if returns_list:
-                total_ret = float((1 + pd.Series(returns_list)).prod() - 1) * 100
+                total_ret = (np.prod([1 + r for r in returns_list]) - 1) * 100
                 avg_ret = np.mean(returns_list) * 100
+                
+                # Get average beta for this portfolio
+                beta_list = port_betas[method_key][pname]
+                avg_beta = np.mean(beta_list) if beta_list else np.nan
             else:
                 total_ret = np.nan
                 avg_ret = np.nan
+                avg_beta = np.nan
             
             results_list.append({
                 'Frequency': frequency,
                 'Method': method_key,
                 'Method_Name': method_name,
-                'Portfolio': port_name,
+                'Portfolio': pname,
                 'Total_Return': total_ret,
                 'Avg_Period_Return': avg_ret,
+                'Avg_Beta': avg_beta,
                 'N_Periods': len(returns_list)
             })
     
-    return pd.DataFrame(results_list)
+    return pd.DataFrame(results_list), pd.DataFrame(prediction_results)
 
 
 def run_full_analysis():
     """
     Run complete analysis across all frequencies.
     
+    Following Hollstein et al. (2020) & Frazzini & Pedersen (2014):
+    - Beta prediction accuracy (RMSE)
+    - BAB portfolio returns
+    
     Returns:
-        Tuple of (detailed_results_df, summary_df)
+        Tuple of (detailed_results_df, prediction_df, summary_df)
     """
     print("\n" + "=" * 80)
-    print("🚀 S&P500 STOCK LOW-BETA ANOMALY ANALYSIS")
+    print("S&P500 STOCK LOW-BETA ANOMALY ANALYSIS")
+    print("Following Hollstein et al. (2020) & Frazzini & Pedersen (2014)")
     print("=" * 80)
-    print(f"📅 Analysis Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"📊 Data Source: S&P500 Constituents")
-    print(f"📈 Frequencies: {', '.join(CONFIG['frequencies'])}")
-    print(f"🕐 Trading Hours: 9:30 AM - 4:00 PM (390 min/day)")
+    print(f"Analysis Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("Data Source: S&P500 Constituents")
+    print(f"Frequencies: {', '.join(CONFIG['frequencies'])}")
+    print("Trading Hours: 9:30 AM - 4:00 PM (390 min/day)")
     print("=" * 80)
     
-    # Find data file
+    # Data directory
     script_dir = Path(__file__).parent
     data_dir = script_dir.parent / "data"
     
-    # Look for S&P500 data file
-    data_files = list(data_dir.glob("S&P500*.xlsx"))
-    if not data_files:
-        data_files = list(data_dir.glob("*S&P500*.xlsx"))
+    # Check if preprocessed data exists
+    sp500_dir = data_dir / "sp500"
+    if not sp500_dir.exists():
+        print(f"ERROR: Preprocessed data not found: {sp500_dir}")
+        print("Please run 'python preprocess_stock_data.py' first!")
+        return None, None, None
     
-    if not data_files:
-        print(f"❌ No S&P500 data file found in: {data_dir}")
-        print("   Expected file pattern: S&P500*.xlsx")
-        return None, None
-    
-    data_file = data_files[0]
-    print(f"📂 Using data file: {data_file.name}")
+    print(f"Using preprocessed data from: {sp500_dir}")
     
     # Collect results for all frequencies
-    all_results = []
+    all_portfolio_results = []
+    all_prediction_results = []
     
     for freq in CONFIG['frequencies']:
-        result_df = analyze_single_frequency(freq, data_file)
-        if not result_df.empty:
-            all_results.append(result_df)
+        portfolio_df, prediction_df = analyze_single_frequency(freq, data_dir)
+        if not portfolio_df.empty:
+            all_portfolio_results.append(portfolio_df)
+        if not prediction_df.empty:
+            all_prediction_results.append(prediction_df)
     
-    if not all_results:
-        print("❌ No results generated!")
-        return None, None
+    if not all_portfolio_results:
+        print("No results generated!")
+        return None, None, None
     
     # Combine all results
-    detailed_df = pd.concat(all_results, ignore_index=True)
+    detailed_df = pd.concat(all_portfolio_results, ignore_index=True)
+    prediction_df = pd.concat(all_prediction_results, ignore_index=True) if all_prediction_results else pd.DataFrame()
     
     # Create summary
-    summary_df = create_summary(detailed_df)
+    summary_df = create_summary(detailed_df, prediction_df)
     
-    return detailed_df, summary_df
+    return detailed_df, prediction_df, summary_df
 
 
-def create_summary(detailed_df: pd.DataFrame) -> pd.DataFrame:
+def create_summary(detailed_df: pd.DataFrame, prediction_df: pd.DataFrame = None) -> pd.DataFrame:
     """Create summary statistics from detailed results."""
     
     # BAB returns pivot
@@ -460,37 +642,82 @@ def create_summary(detailed_df: pd.DataFrame) -> pd.DataFrame:
     return summary_df
 
 
-def print_comprehensive_summary(detailed_df: pd.DataFrame, summary_df: pd.DataFrame):
-    """Print comprehensive analysis summary."""
+def print_comprehensive_summary(detailed_df: pd.DataFrame, summary_df: pd.DataFrame, prediction_df: pd.DataFrame = None):
+    """
+    Print comprehensive analysis summary.
+    
+    Following Hollstein et al. (2020) & Frazzini & Pedersen (2014).
+    """
     
     print("\n" + "=" * 80)
-    print("📊 COMPREHENSIVE RESULTS SUMMARY")
+    print("COMPREHENSIVE RESULTS SUMMARY")
+    print("   Following Hollstein et al. (2020) & Frazzini & Pedersen (2014)")
     print("=" * 80)
     
     # 1. Parameter Settings
     print("\n" + "-" * 60)
-    print("⚙️  PARAMETER SETTINGS BY FREQUENCY:")
+    print("PARAMETER SETTINGS (Hollstein et al. 2020):")
     print("-" * 60)
-    print(f"{'Frequency':<10} {'Window':<12} {'Window (obs)':<15} {'Hold':<10} {'K':<8}")
+    print(f"HF Window: {CONFIG['window_months'].get('30min', 6)} months (High-frequency)")
+    print(f"Daily Window: {CONFIG['window_months'].get('1d', 12)} months")
+    print(f"Beta Shrinkage: {CONFIG['beta_shrinkage']} (Vasicek)")
+    print(f"Portfolios: {CONFIG['n_portfolios']} (Quintile)")
+    print("Rebalancing: Monthly")
+    print("BAB Formula: (1/β_L) × R_L - (1/β_H) × R_H")
+    
+    print("\n" + "-" * 60)
+    print(f"{'Frequency':<10} {'Window':<15} {'Obs/Day':<10}")
     print("-" * 60)
     
     for freq in CONFIG['frequencies']:
-        window_days = CONFIG['window_days'].get(freq, 30)
+        window_months = CONFIG['window_months'].get(freq, 6)
         freq_minutes = STOCK_FREQUENCY_MINUTES.get(freq, 1)
         obs_per_day = STOCK_MINUTES_PER_DAY // freq_minutes
-        window_obs = obs_per_day * window_days
-        K_approx = max(3 if freq == '1d' else 2, int(0.333 * np.sqrt(window_obs)))
-        print(f"{freq:<10} {window_days} days{'':<5} {window_obs:>12,} {CONFIG['holding_period_days']} days{'':<3} {K_approx:<8}")
+        print(f"{freq:<10} {window_months} months{'':<7} {obs_per_day:>6}")
     
-    print("-" * 60)
-    print("Rebalance: Weekly (every Monday)")
-    print("Portfolio: 5 quintiles (Low_Beta, Q2, Q3, Q4, High_Beta)")
-    print("BAB Strategy: Long Low_Beta, Short High_Beta")
-    print("Trading Hours: 9:30 AM - 4:00 PM (390 min/day)")
+    # 2. Beta Prediction Accuracy (Hollstein et al. 2020 - KEY RESULT)
+    if prediction_df is not None and not prediction_df.empty:
+        print("\n" + "=" * 80)
+        print("BETA PREDICTION ACCURACY (Hollstein et al. 2020)")
+        print("   Lower RMSE = Better prediction of future realized beta")
+        print("=" * 80)
+        
+        rmse_pivot = prediction_df.pivot_table(
+            values='RMSE',
+            index='Method_Name',
+            columns='Frequency',
+            aggfunc='first'
+        )
+        
+        freq_order = ['1min', '5min', '15min', '30min', '1h', '1d']
+        rmse_pivot = rmse_pivot[[f for f in freq_order if f in rmse_pivot.columns]]
+        
+        print("\nBeta Prediction RMSE:")
+        print(rmse_pivot.round(4).to_string())
+        
+        # Best frequency per method
+        print("\n" + "-" * 60)
+        print("[BEST] Frequency per Method (Lowest RMSE):")
+        for method in rmse_pivot.index:
+            best_freq = rmse_pivot.loc[method].idxmin()
+            best_rmse = rmse_pivot.loc[method].min()
+            print(f"   {method}: {best_freq} (RMSE={best_rmse:.4f})")
+        
+        # Compare HF vs Daily (Hollstein et al. key finding)
+        if '30min' in rmse_pivot.columns and '1d' in rmse_pivot.columns:
+            print("\n" + "-" * 60)
+            print("HF(30min) vs Daily(1d) - Hollstein et al. Key Finding:")
+            for method in rmse_pivot.index:
+                hf_rmse = rmse_pivot.loc[method, '30min']
+                daily_rmse = rmse_pivot.loc[method, '1d']
+                improvement = (1 - hf_rmse / daily_rmse) * 100 if daily_rmse > 0 else 0
+                status = "[+]" if hf_rmse < daily_rmse else "[-]"
+                print(f"   {status} {method}: HF={hf_rmse:.4f}, Daily={daily_rmse:.4f} ({improvement:+.1f}%)")
     
-    # 2. BAB Returns Table
+    # 3. BAB Returns Table
     print("\n" + "=" * 80)
-    print("📈 BAB RETURNS BY METHOD & FREQUENCY")
+    print("BAB RETURNS BY METHOD & FREQUENCY")
+    print("   (Leverage-adjusted: Long 1/β_L, Short 1/β_H)")
     print("=" * 80)
     
     bab_df = detailed_df[detailed_df['Portfolio'] == 'BAB'].copy()
@@ -502,36 +729,60 @@ def print_comprehensive_summary(detailed_df: pd.DataFrame, summary_df: pd.DataFr
     )
     
     # Reorder columns
-    freq_order = ['5min', '15min', '30min', '1h', '1d']
+    freq_order = ['1min', '5min', '15min', '30min', '1h', '1d']
     bab_pivot = bab_pivot[[f for f in freq_order if f in bab_pivot.columns]]
     
-    print("\nBAB (Low_Beta - High_Beta) Total Returns (%):")
+    print("\nBAB Total Returns (%):")
     print(bab_pivot.round(2).to_string())
     
-    # 3. Average BAB by Method
+    # 4. Average BAB by Method
     print("\n" + "-" * 60)
-    print("📊 Average BAB Return by Method:")
+    print("Average BAB Return by Method:")
     avg_bab = bab_pivot.mean(axis=1).sort_values(ascending=False)
     for method, avg in avg_bab.items():
-        print(f"  {method}: {avg:.2f}%")
+        status = "[+]" if avg > 0 else "[-]"
+        print(f"  {status} {method}: {avg:.2f}%")
     
     # 4. Best Method per Frequency
     print("\n" + "-" * 60)
-    print("🏆 Best Method per Frequency:")
+    print("[BEST] Method per Frequency:")
     for col in bab_pivot.columns:
         best_method = bab_pivot[col].idxmax()
         best_return = bab_pivot[col].max()
-        status = "✅ Positive" if best_return > 0 else "❌ Negative"
+        status = "[+]" if best_return > 0 else "[-]"
         print(f"  {col}: {best_method} ({best_return:.2f}%) {status}")
     
     # 5. Overall Best
     print("\n" + "-" * 60)
     overall_best = avg_bab.idxmax()
-    print(f"🥇 Overall Best Method (Avg BAB): {overall_best} ({avg_bab[overall_best]:.2f}%)")
+    print(f"[WINNER] Overall Best Method (Avg BAB): {overall_best} ({avg_bab[overall_best]:.2f}%)")
     
-    # 6. Comparison: Crypto vs Stock Expected
+    # 6. Quintile Portfolio Returns - Show ALL methods
     print("\n" + "=" * 80)
-    print("📝 KEY FINDINGS")
+    print("QUINTILE PORTFOLIO RETURNS (Q1=Low Beta, Q5=High Beta)")
+    print("=" * 80)
+    
+    # Show for all methods
+    for method_key, method_name in CONFIG['methods'].items():
+        quintile_df = detailed_df[
+            (detailed_df['Method'] == method_key) & 
+            (detailed_df['Portfolio'].str.startswith('Q'))
+        ]
+        
+        if not quintile_df.empty:
+            quintile_pivot = quintile_df.pivot_table(
+                values='Total_Return',
+                index='Portfolio',
+                columns='Frequency',
+                aggfunc='first'
+            )
+            quintile_pivot = quintile_pivot[[f for f in freq_order if f in quintile_pivot.columns]]
+            print(f"\n{method_name}:")
+            print(quintile_pivot.round(2).to_string())
+    
+    # 7. Key Findings
+    print("\n" + "=" * 80)
+    print("KEY FINDINGS")
     print("=" * 80)
     
     # Check for Low-Beta Anomaly
@@ -541,17 +792,17 @@ def print_comprehensive_summary(detailed_df: pd.DataFrame, summary_df: pd.DataFr
             positive_freqs.append(col)
     
     if positive_freqs:
-        print(f"\n✅ Low-Beta Anomaly DETECTED in: {', '.join(positive_freqs)}")
+        print(f"\n[+] Low-Beta Anomaly DETECTED in: {', '.join(positive_freqs)}")
         for freq in positive_freqs:
             best = bab_pivot[freq].idxmax()
             ret = bab_pivot[freq].max()
             print(f"   → {freq}: {best} achieves +{ret:.2f}% BAB return")
     else:
-        print("\n❌ No Low-Beta Anomaly detected (all BAB returns negative)")
+        print("\n[-] No Low-Beta Anomaly detected (all BAB returns negative)")
     
     # Market characteristic notes
     print("\n" + "-" * 60)
-    print("📌 US Stock Market Characteristics:")
+    print("[NOTE] US Stock Market Characteristics:")
     print("   - Limited trading hours (9:30 AM - 4:00 PM)")
     print("   - Lower volatility compared to crypto")
     print("   - Established low-beta anomaly in literature")
@@ -559,7 +810,7 @@ def print_comprehensive_summary(detailed_df: pd.DataFrame, summary_df: pd.DataFr
     
     # 7. Method Descriptions
     print("\n" + "=" * 80)
-    print("📖 METHOD DESCRIPTIONS")
+    print("METHOD DESCRIPTIONS")
     print("=" * 80)
     print("""
 1. TARV Individual α    : Original TARV (tail-first), per-asset alpha estimation
@@ -579,12 +830,12 @@ def save_results(detailed_df: pd.DataFrame, summary_df: pd.DataFrame, output_dir
     # Detailed results
     detailed_path = output_dir / "stock_analysis_results.csv"
     detailed_df.to_csv(detailed_path, index=False)
-    print(f"\n✅ Detailed results saved to: {detailed_path}")
+    print(f"\n[SAVED] Detailed results saved to: {detailed_path}")
     
     # Summary
     summary_path = output_dir / "stock_analysis_summary.csv"
     summary_df.to_csv(summary_path, index=False)
-    print(f"✅ Summary saved to: {summary_path}")
+    print(f"[SAVED] Summary saved to: {summary_path}")
     
     # BAB pivot table
     bab_df = detailed_df[detailed_df['Portfolio'] == 'BAB'].copy()
@@ -596,7 +847,7 @@ def save_results(detailed_df: pd.DataFrame, summary_df: pd.DataFrame, output_dir
     )
     bab_path = output_dir / "stock_bab_returns.csv"
     bab_pivot.to_csv(bab_path)
-    print(f"✅ BAB returns table saved to: {bab_path}")
+    print(f"[SAVED] BAB returns table saved to: {bab_path}")
 
 
 # =============================================================================
@@ -607,21 +858,27 @@ def main():
     """Main entry point."""
     
     # Run full analysis
-    detailed_df, summary_df = run_full_analysis()
+    detailed_df, prediction_df, summary_df = run_full_analysis()
     
     if detailed_df is None:
-        print("\n❌ Analysis failed!")
+        print("\n[ERROR] Analysis failed!")
         return
     
     # Print comprehensive summary
-    print_comprehensive_summary(detailed_df, summary_df)
+    print_comprehensive_summary(detailed_df, summary_df, prediction_df)
     
     # Save results
     output_dir = Path(__file__).parent
     save_results(detailed_df, summary_df, output_dir)
     
+    # Save prediction results
+    if prediction_df is not None and not prediction_df.empty:
+        pred_path = output_dir / "stock_beta_prediction.csv"
+        prediction_df.to_csv(pred_path, index=False)
+        print(f"[SAVED] Beta prediction results saved to: {pred_path}")
+    
     print("\n" + "=" * 80)
-    print("🎉 ANALYSIS COMPLETE!")
+    print("ANALYSIS COMPLETE!")
     print("=" * 80)
 
 
