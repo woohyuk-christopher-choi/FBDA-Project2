@@ -958,3 +958,301 @@ def optimal_K(n: int, method: str = 'sqrt') -> int:
         return max(2, int(1.5 * np.sqrt(n)))
     else:
         return max(2, int(np.sqrt(n)))
+
+
+# =============================================================================
+# 8. Truncate-First TARV Functions (Alternative Method)
+# =============================================================================
+
+def calculate_tarv_variance_truncate_first(
+    returns: np.ndarray,
+    K: int,
+    p: int = 1,
+    c: float = 0.35,
+    weight_type: str = 'bartlett',
+    return_details: bool = False,
+    universal_alpha: Optional[float] = None,
+    initial_truncate_quantile: float = 0.95
+) -> Union[float, TARVResult]:
+    """
+    Calculate TARV variance with TRUNCATION-FIRST approach.
+    
+    Key difference from original TARV:
+    - Original: Estimate tail α from ALL data → then truncate
+    - This method: Initial truncation → Estimate α from clean data → Final truncation
+    """
+    returns = np.asarray(returns)
+    returns = returns[~np.isnan(returns)]
+    n = len(returns)
+    
+    if n < K + 10:
+        if return_details:
+            return TARVResult(
+                tarv=np.nan, standard_rv=np.nan, n_truncated=0,
+                n_total=n, truncation_rate=0, threshold=0, alpha=0
+            )
+        return np.nan
+    
+    Y_bar = preaverage_returns(returns, K, weight_type)
+    Q = Y_bar ** 2
+    
+    if universal_alpha is not None:
+        alpha = universal_alpha
+    else:
+        # TRUNCATE-FIRST: Apply initial quantile-based truncation before tail estimation
+        MQ = np.median(Q)
+        abs_dev = np.abs(Q - MQ)
+        initial_theta = np.quantile(abs_dev, initial_truncate_quantile)
+        initial_mask = abs_dev <= initial_theta
+        Q_for_tail = Q[initial_mask]
+        
+        if len(Q_for_tail) < 10:
+            Q_for_tail = Q
+        
+        tail_result = estimate_tail_index(Q_for_tail, p=p)
+        alpha = tail_result.alpha
+    
+    thresh_result = calculate_threshold(Q, alpha, p=p, c=c)
+    theta = thresh_result.theta
+    truncated_Q, mask, n_truncated = truncate_with_median_centering(Q, theta)
+    
+    phi_22 = np.sum(compute_preaveraging_weights(K - 1, weight_type) ** 2)
+    tarv = np.sum(truncated_Q) / phi_22
+    standard_rv = np.sum(Q) / phi_22
+    
+    if return_details:
+        return TARVResult(
+            tarv=tarv, standard_rv=standard_rv, n_truncated=n_truncated,
+            n_total=len(Q), truncation_rate=n_truncated / len(Q) * 100,
+            threshold=theta, alpha=alpha
+        )
+    return tarv
+
+
+def calculate_tarv_covariance_truncate_first(
+    returns_i: np.ndarray,
+    returns_j: np.ndarray,
+    K: int,
+    p: int = 2,
+    c: float = 0.35,
+    weight_type: str = 'bartlett',
+    return_details: bool = False,
+    universal_alpha: Optional[float] = None,
+    initial_truncate_quantile: float = 0.95
+) -> Union[float, TARVResult]:
+    """Calculate TARV covariance with TRUNCATION-FIRST approach."""
+    returns_i = np.asarray(returns_i)
+    returns_j = np.asarray(returns_j)
+    
+    valid_mask = ~(np.isnan(returns_i) | np.isnan(returns_j))
+    returns_i = returns_i[valid_mask]
+    returns_j = returns_j[valid_mask]
+    n = len(returns_i)
+    
+    if n < K + 10:
+        if return_details:
+            return TARVResult(
+                tarv=np.nan, standard_rv=np.nan, n_truncated=0,
+                n_total=n, truncation_rate=0, threshold=0, alpha=0
+            )
+        return np.nan
+    
+    Y_bar_i = preaverage_returns(returns_i, K, weight_type)
+    Y_bar_j = preaverage_returns(returns_j, K, weight_type)
+    Q = Y_bar_i * Y_bar_j
+    
+    if universal_alpha is not None:
+        alpha = universal_alpha
+    else:
+        Q_abs = np.abs(Q)
+        MQ = np.median(Q_abs)
+        abs_dev = np.abs(Q_abs - MQ)
+        initial_theta = np.quantile(abs_dev, initial_truncate_quantile)
+        initial_mask = abs_dev <= initial_theta
+        Q_for_tail = Q_abs[initial_mask]
+        
+        if len(Q_for_tail) < 10:
+            Q_for_tail = Q_abs
+        
+        tail_result = estimate_tail_index(Q_for_tail, p=p)
+        alpha = tail_result.alpha
+    
+    thresh_result = calculate_threshold(Q, alpha, p=p, c=c)
+    theta = thresh_result.theta
+    truncated_Q, mask, n_truncated = truncate_with_median_centering(Q, theta)
+    
+    phi_22 = np.sum(compute_preaveraging_weights(K - 1, weight_type) ** 2)
+    tarv_cov = np.sum(truncated_Q) / phi_22
+    standard_cov = np.sum(Q) / phi_22
+    
+    if return_details:
+        return TARVResult(
+            tarv=tarv_cov, standard_rv=standard_cov, n_truncated=n_truncated,
+            n_total=len(Q), truncation_rate=n_truncated / len(Q) * 100,
+            threshold=theta, alpha=alpha
+        )
+    return tarv_cov
+
+
+def calculate_realized_beta_truncate_first(
+    asset_returns: np.ndarray,
+    market_returns: np.ndarray,
+    K: int,
+    p: int = 2,
+    c: float = 0.35,
+    weight_type: str = 'bartlett',
+    universal_alpha: Optional[float] = None
+) -> Tuple[float, dict]:
+    """Calculate realized beta using TRUNCATION-FIRST TARV method."""
+    asset_returns = np.asarray(asset_returns)
+    market_returns = np.asarray(market_returns)
+    
+    valid_mask = ~(np.isnan(asset_returns) | np.isnan(market_returns))
+    asset_returns = asset_returns[valid_mask]
+    market_returns = market_returns[valid_mask]
+    
+    cov_result = calculate_tarv_covariance_truncate_first(
+        asset_returns, market_returns, K, p, c, weight_type, 
+        return_details=True, universal_alpha=universal_alpha
+    )
+    var_result = calculate_tarv_variance_truncate_first(
+        market_returns, K, p, c, weight_type, 
+        return_details=True, universal_alpha=universal_alpha
+    )
+    
+    cov = cov_result.tarv
+    var_market = var_result.tarv
+    
+    info = {
+        'method': 'TARV-TruncateFirst',
+        'cov': cov, 'var_market': var_market,
+        'cov_alpha': cov_result.alpha, 'var_alpha': var_result.alpha,
+        'cov_truncation_rate': cov_result.truncation_rate,
+        'var_truncation_rate': var_result.truncation_rate
+    }
+    
+    beta = cov / var_market if var_market != 0 and not np.isnan(var_market) else np.nan
+    info['beta'] = beta
+    return beta, info
+
+
+# =============================================================================
+# 9. Simple Truncation (No Tail-Adaptive)
+# =============================================================================
+
+def calculate_simple_truncated_variance(
+    returns: np.ndarray,
+    K: int,
+    truncate_quantile: float = 0.95,
+    weight_type: str = 'bartlett',
+    return_details: bool = False
+) -> Union[float, TARVResult]:
+    """Calculate realized variance with simple quantile-based truncation (no tail-adaptive)."""
+    returns = np.asarray(returns)
+    returns = returns[~np.isnan(returns)]
+    n = len(returns)
+    
+    if n < K + 10:
+        if return_details:
+            return TARVResult(tarv=np.nan, standard_rv=np.nan, n_truncated=0,
+                n_total=n, truncation_rate=0, threshold=0, alpha=0)
+        return np.nan
+    
+    Y_bar = preaverage_returns(returns, K, weight_type)
+    Q = Y_bar ** 2
+    
+    MQ = np.median(Q)
+    abs_dev = np.abs(Q - MQ)
+    theta = np.quantile(abs_dev, truncate_quantile)
+    
+    truncated_Q, mask, n_truncated = truncate_with_median_centering(Q, theta)
+    
+    phi_22 = np.sum(compute_preaveraging_weights(K - 1, weight_type) ** 2)
+    truncated_rv = np.sum(truncated_Q) / phi_22
+    standard_rv = np.sum(Q) / phi_22
+    
+    if return_details:
+        return TARVResult(tarv=truncated_rv, standard_rv=standard_rv, n_truncated=n_truncated,
+            n_total=len(Q), truncation_rate=n_truncated / len(Q) * 100, threshold=theta, alpha=0)
+    return truncated_rv
+
+
+def calculate_simple_truncated_covariance(
+    returns_i: np.ndarray,
+    returns_j: np.ndarray,
+    K: int,
+    truncate_quantile: float = 0.95,
+    weight_type: str = 'bartlett',
+    return_details: bool = False
+) -> Union[float, TARVResult]:
+    """Calculate realized covariance with simple quantile-based truncation."""
+    returns_i = np.asarray(returns_i)
+    returns_j = np.asarray(returns_j)
+    
+    valid_mask = ~(np.isnan(returns_i) | np.isnan(returns_j))
+    returns_i = returns_i[valid_mask]
+    returns_j = returns_j[valid_mask]
+    n = len(returns_i)
+    
+    if n < K + 10:
+        if return_details:
+            return TARVResult(tarv=np.nan, standard_rv=np.nan, n_truncated=0,
+                n_total=n, truncation_rate=0, threshold=0, alpha=0)
+        return np.nan
+    
+    Y_bar_i = preaverage_returns(returns_i, K, weight_type)
+    Y_bar_j = preaverage_returns(returns_j, K, weight_type)
+    Q = Y_bar_i * Y_bar_j
+    
+    MQ = np.median(Q)
+    abs_dev = np.abs(Q - MQ)
+    theta = np.quantile(abs_dev, truncate_quantile)
+    
+    truncated_Q, mask, n_truncated = truncate_with_median_centering(Q, theta)
+    
+    phi_22 = np.sum(compute_preaveraging_weights(K - 1, weight_type) ** 2)
+    truncated_cov = np.sum(truncated_Q) / phi_22
+    standard_cov = np.sum(Q) / phi_22
+    
+    if return_details:
+        return TARVResult(tarv=truncated_cov, standard_rv=standard_cov, n_truncated=n_truncated,
+            n_total=len(Q), truncation_rate=n_truncated / len(Q) * 100, threshold=theta, alpha=0)
+    return truncated_cov
+
+
+def calculate_realized_beta_simple_truncation(
+    asset_returns: np.ndarray,
+    market_returns: np.ndarray,
+    K: int,
+    truncate_quantile: float = 0.95,
+    weight_type: str = 'bartlett'
+) -> Tuple[float, dict]:
+    """Calculate realized beta using simple quantile-based truncation."""
+    asset_returns = np.asarray(asset_returns)
+    market_returns = np.asarray(market_returns)
+    
+    valid_mask = ~(np.isnan(asset_returns) | np.isnan(market_returns))
+    asset_returns = asset_returns[valid_mask]
+    market_returns = market_returns[valid_mask]
+    
+    cov_result = calculate_simple_truncated_covariance(
+        asset_returns, market_returns, K, truncate_quantile, weight_type, return_details=True
+    )
+    var_result = calculate_simple_truncated_variance(
+        market_returns, K, truncate_quantile, weight_type, return_details=True
+    )
+    
+    cov = cov_result.tarv
+    var_market = var_result.tarv
+    
+    info = {
+        'method': 'Simple-Truncation',
+        'cov': cov, 'var_market': var_market,
+        'truncate_quantile': truncate_quantile,
+        'cov_truncation_rate': cov_result.truncation_rate,
+        'var_truncation_rate': var_result.truncation_rate
+    }
+    
+    beta = cov / var_market if var_market != 0 and not np.isnan(var_market) else np.nan
+    info['beta'] = beta
+    return beta, info
