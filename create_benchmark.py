@@ -5,7 +5,7 @@ Supports multiple timeframes: 1m, 5m, 15m, 30m, 1h, 1d
 """
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Dict, Optional
 import polars as pl
@@ -160,7 +160,9 @@ UPBIT_CONSTITUENTS = [
     "BCH"  # 비트코인캐시
 ]
 
-UPBIT_BASE_DATE = "2017-10-01"  # 업비트 지수 기준 시점
+# Calculate Upbit base date as 720 days ago from today
+UPBIT_LOOKBACK_DAYS = 720
+UPBIT_BASE_DATE = (datetime.now() - timedelta(days=UPBIT_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
 UPBIT_BASE_VALUE = 1000  # 업비트 지수 기준 값
 
 
@@ -313,6 +315,130 @@ def generate_benchmark_summary():
         console.print(f"  Use collector.py to gather candle data for all tickers.\n")
 
 
+def check_upbit_data_availability(data_dir: Path, timeframes: Optional[List[str]] = None) -> Dict[str, Dict[str, bool]]:
+    """
+    Check which Upbit tickers have price data available for specified timeframes
+
+    Args:
+        data_dir: Directory containing price data
+        timeframes: List of timeframes to check (e.g., ['1m', '5m', '1d'])
+                   If None, checks all timeframes
+
+    Returns:
+        Dictionary mapping ticker -> timeframe -> availability (True/False)
+    """
+    if timeframes is None:
+        timeframes = TIMEFRAMES
+
+    availability = {}
+
+    console.print(
+        f"\n[bold]Checking Upbit data availability for {len(UPBIT_CONSTITUENTS)} tickers across {len(timeframes)} timeframes...[/bold]\n")
+
+    # Create table for better visualization
+    table = Table(show_header=True, header_style="bold magenta")
+    table.add_column("Ticker", style="magenta")
+    for tf in timeframes:
+        table.add_column(tf, justify="center")
+
+    for ticker in UPBIT_CONSTITUENTS:
+        availability[ticker] = {}
+        row = [f"KRW-{ticker}"]
+
+        for tf in timeframes:
+            file_path = find_upbit_data_file(data_dir, ticker, tf)
+            has_data = file_path is not None
+            availability[ticker][tf] = has_data
+
+            status = "✓" if has_data else "✗"
+            color = "green" if has_data else "red"
+            row.append(f"[{color}]{status}[/{color}]")
+
+        table.add_row(*row)
+
+    console.print(table)
+
+    return availability
+
+
+def generate_upbit_benchmark_summary():
+    """Generate summary of what's needed for Upbit benchmark creation"""
+
+    console.print("\n[bold magenta]═══════════════════════════════════════════════════════[/bold magenta]")
+    console.print("[bold magenta]  Upbit Equal-Weighted Benchmark - Data Requirements   [/bold magenta]")
+    console.print("[bold magenta]═══════════════════════════════════════════════════════[/bold magenta]\n")
+
+    console.print(f"[bold]Index Type:[/bold] Fixed constituents (no rebalancing)")
+    console.print(f"[bold]Base Date:[/bold] {UPBIT_BASE_DATE}")
+    console.print(f"[bold]Base Value:[/bold] {UPBIT_BASE_VALUE}")
+    console.print(f"[bold]Total Constituents:[/bold] {len(UPBIT_CONSTITUENTS)} (equal-weighted)")
+    console.print(f"[bold]Timeframes:[/bold] {', '.join(TIMEFRAMES)}\n")
+
+    console.print("[bold]Required Tickers:[/bold]")
+    for i, ticker in enumerate(UPBIT_CONSTITUENTS, 1):
+        console.print(f"  {i:2d}. KRW-{ticker}")
+
+    console.print(f"\n[bold yellow]Data Collection Needed:[/bold yellow]")
+    console.print(f"  • Candle data for all {len(UPBIT_CONSTITUENTS)} KRW pairs")
+    console.print(f"  • Timeframes: {', '.join(TIMEFRAMES)}")
+    console.print(f"  • Date range: From {UPBIT_BASE_DATE} to present")
+    console.print(f"  • Recommended format: Parquet or Arrow")
+    console.print(f"  • Use collector.py to gather this data from Upbit\n")
+
+    # Check if data directory exists
+    data_dir = Path("file")
+    if data_dir.exists():
+        availability = check_upbit_data_availability(data_dir, TIMEFRAMES)
+
+        # Calculate statistics
+        console.print(f"\n[bold]Data Completeness by Timeframe:[/bold]")
+        for tf in TIMEFRAMES:
+            available_count = sum(1 for ticker_data in availability.values() if ticker_data.get(tf, False))
+            percentage = (available_count / len(UPBIT_CONSTITUENTS)) * 100
+
+            color = "green" if percentage == 100 else "yellow" if percentage > 50 else "red"
+            console.print(f"  {tf:4s}: [{color}]{available_count:2d}/{len(UPBIT_CONSTITUENTS)}[/{color}] ({percentage:.1f}%)")
+
+        # Check for completely missing tickers (no data at all)
+        missing_all = []
+        for ticker, ticker_data in availability.items():
+            if not any(ticker_data.values()):
+                missing_all.append(ticker)
+
+        if missing_all:
+            console.print(f"\n[bold red]Tickers with NO data for ANY timeframe:[/bold red]")
+            for ticker in missing_all:
+                console.print(f"  • KRW-{ticker}")
+
+        # Check for partially missing data
+        partial_missing = []
+        for ticker, ticker_data in availability.items():
+            if any(ticker_data.values()) and not all(ticker_data.values()):
+                missing_tfs = [tf for tf, avail in ticker_data.items() if not avail]
+                partial_missing.append((ticker, missing_tfs))
+
+        if partial_missing:
+            console.print(f"\n[bold yellow]Tickers with PARTIAL data (missing some timeframes):[/bold yellow]")
+            for ticker, missing_tfs in partial_missing:
+                console.print(f"  • KRW-{ticker}: missing {', '.join(missing_tfs)}")
+
+        if missing_all or partial_missing:
+            console.print(f"\n[bold yellow]Action Required:[/bold yellow]")
+            console.print(f"  Run collector.py to collect missing Upbit data")
+            console.print(f"  Example collection process:")
+            console.print(f"    poetry run python collector.py")
+            console.print(f"    -> Select: Upbit (2)")
+            console.print(f"    -> Select: desired timeframe")
+            console.print(f"    -> Enter: ticker (e.g., KRW-BTC)")
+        else:
+            console.print(f"\n[bold green]✓ All required Upbit data is available![/bold green]")
+            console.print(f"  You can now create benchmark candles for all timeframes.")
+    else:
+        console.print(f"\n[bold red]No data directory found![/bold red]")
+        console.print(f"  Please create 'file' folder and collect price data first.")
+        console.print(f"  Use collector.py to gather candle data for all tickers.\n")
+
+
 def find_data_file(data_dir: Path, ticker: str, timeframe: str) -> Optional[Path]:
     """
     Find the data file for a given ticker and timeframe
@@ -357,24 +483,17 @@ def find_upbit_data_file(data_dir: Path, ticker: str, timeframe: str) -> Optiona
     Returns:
         Path to the data file if found, None otherwise
     """
-    # Upbit uses different timeframe naming
-    upbit_timeframe_map = {
-        '1m': '1',
-        '5m': '5',
-        '15m': '15',
-        '30m': '30',
-        '1h': '60',
-        '1d': 'day'
-    }
-
-    upbit_tf = upbit_timeframe_map.get(timeframe, timeframe)
-
     possible_files = [
-        data_dir / "upbit" / f"KRW-{ticker}_{upbit_tf}m.parquet",
-        data_dir / "upbit" / f"KRW-{ticker}_{upbit_tf}m.arrow",
-        data_dir / "upbit" / f"KRW-{ticker}_{upbit_tf}m.csv",
-        data_dir / f"KRW-{ticker}_{upbit_tf}m.parquet",
-        data_dir / f"KRW-{ticker}_{upbit_tf}m.arrow",
+        # New pattern: upbit_KRW_{ticker}_{timeframe}.arrow
+        data_dir / f"upbit_KRW_{ticker}_{timeframe}.arrow",
+        data_dir / f"upbit_KRW_{ticker}_{timeframe}.parquet",
+        data_dir / f"upbit_{ticker}_{timeframe}.arrow",
+        data_dir / f"upbit_{ticker}_{timeframe}.parquet",
+        # In upbit subdirectory
+        data_dir / "upbit" / f"upbit_KRW_{ticker}_{timeframe}.arrow",
+        data_dir / "upbit" / f"upbit_KRW_{ticker}_{timeframe}.parquet",
+        data_dir / "upbit" / f"upbit_{ticker}_{timeframe}.arrow",
+        data_dir / "upbit" / f"upbit_{ticker}_{timeframe}.parquet",
     ]
 
     for file_path in possible_files:
@@ -513,7 +632,14 @@ def create_benchmark_candles(data_dir: Path, timeframe: str, output_dir: Path):
             continue
 
         # Calculate equal-weighted index for this period
-        period_index = calculate_equal_weighted_index(period_data, last_index_value)
+        # Show progress for periods with substantial data (>1000 timestamps)
+        show_progress_for_period = len(period_data) > 0
+        if show_progress_for_period:
+            # Estimate timestamps by checking first constituent
+            first_ticker_data = next(iter(period_data.values()))
+            show_progress_for_period = first_ticker_data.height > 1000
+
+        period_index = calculate_equal_weighted_index(period_data, last_index_value, show_progress=show_progress_for_period)
 
         if period_index is not None and period_index.height > 0:
             all_period_indices.append(period_index)
@@ -541,7 +667,7 @@ def create_benchmark_candles(data_dir: Path, timeframe: str, output_dir: Path):
     console.print(f"[cyan]Step 4:[/cyan] Saving benchmark data...")
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_file = output_dir / f"benchmark_{timeframe}.parquet"
+    output_file = output_dir / f"binance_benchmark_{timeframe}.parquet"
 
     benchmark_df.write_parquet(output_file, compression='zstd')
 
@@ -554,9 +680,10 @@ def create_benchmark_candles(data_dir: Path, timeframe: str, output_dir: Path):
 
 
 def calculate_equal_weighted_index(period_data: Dict[str, pl.DataFrame],
-                                   last_index_value: Optional[float] = None) -> pl.DataFrame:
+                                   last_index_value: Optional[float] = None,
+                                   show_progress: bool = False) -> pl.DataFrame:
     """
-    Calculate equal-weighted index for a single rebalancing period
+    Calculate equal-weighted index for a single rebalancing period (OPTIMIZED VERSION)
 
     Formula: Index = Base × Σ(w_i × S_i,t / S_i,t_r) where w_i = 0.1
 
@@ -568,6 +695,7 @@ def calculate_equal_weighted_index(period_data: Dict[str, pl.DataFrame],
     Args:
         period_data: Dictionary of ticker -> DataFrame with 'timestamp' and 'close' columns
         last_index_value: Index value from previous period (for continuity)
+        show_progress: Whether to show progress bar during calculation
 
     Returns:
         DataFrame with columns: timestamp, index_value, index_return
@@ -575,93 +703,101 @@ def calculate_equal_weighted_index(period_data: Dict[str, pl.DataFrame],
     if not period_data:
         return None
 
-    # Find common timestamps across all tickers
-    common_timestamps = None
-    for ticker, df in period_data.items():
-        ticker_timestamps = set(df['timestamp'].to_list())
-        if common_timestamps is None:
-            common_timestamps = ticker_timestamps
-        else:
-            common_timestamps = common_timestamps.intersection(ticker_timestamps)
+    if show_progress:
+        console.print(f"    [dim]Optimizing data structure for {len(period_data)} tickers...[/dim]")
 
-    if not common_timestamps:
-        console.print(f"    [yellow]⚠[/yellow] No common timestamps found")
+    # Step 1: Collect all unique timestamps from all tickers
+    all_timestamps = set()
+    for ticker, df in period_data.items():
+        all_timestamps.update(df['timestamp'].to_list())
+
+    if not all_timestamps:
+        console.print(f"    [yellow]⚠[/yellow] No timestamps found in data")
         return None
 
-    common_timestamps = sorted(list(common_timestamps))
+    all_timestamps = sorted(list(all_timestamps))
 
-    # Get base prices (first timestamp of period = rebalancing time t_r)
-    base_timestamp = common_timestamps[0]
-    base_prices = {}
+    # Create base timestamp DataFrame
+    base_ts_df = pl.DataFrame({'timestamp': all_timestamps}).with_columns([
+        pl.col('timestamp').cast(pl.Datetime('ms'))
+    ])
+
+    # Step 2: Join all ticker data into a single wide DataFrame (much faster than repeated filtering)
+    combined_df = base_ts_df
 
     for ticker, df in period_data.items():
-        base_price_series = df.filter(pl.col('timestamp') == base_timestamp)['close']
-        if len(base_price_series) == 0:
-            console.print(f"    [yellow]⚠[/yellow] No base price for {ticker}")
+        ticker_data = df.select(['timestamp', 'close']).rename({'close': f'close_{ticker}'})
+        combined_df = combined_df.join(ticker_data, on='timestamp', how='left', coalesce=True)
+
+    # Forward-fill and backward-fill missing values for all tickers at once
+    close_cols = [col for col in combined_df.columns if col.startswith('close_')]
+    combined_df = combined_df.with_columns([
+        pl.col(col).fill_null(strategy='forward').fill_null(strategy='backward')
+        for col in close_cols
+    ])
+
+    # Step 3: Filter to timestamps with at least 80% data coverage
+    min_tickers_required = max(1, int(len(period_data) * 0.8))
+
+    # Count non-null values per row
+    combined_df = combined_df.with_columns([
+        pl.sum_horizontal([pl.col(col).is_not_null().cast(pl.Int32) for col in close_cols]).alias('_ticker_count')
+    ])
+
+    # Filter to rows with sufficient coverage
+    combined_df = combined_df.filter(pl.col('_ticker_count') >= min_tickers_required).drop('_ticker_count')
+
+    if combined_df.height == 0:
+        console.print(f"    [yellow]⚠[/yellow] No timestamps with sufficient data coverage")
+        return None
+
+    # Step 4: Get base prices (first row = rebalancing time)
+    base_row = combined_df.row(0, named=True)
+    base_prices = {ticker: base_row[f'close_{ticker}'] for ticker in period_data.keys()}
+
+    # Check for missing base prices
+    for ticker, base_price in base_prices.items():
+        if base_price is None or base_price == 0:
+            console.print(f"    [yellow]⚠[/yellow] Invalid base price for {ticker}")
             return None
-        base_prices[ticker] = base_price_series[0]
 
-    # Calculate index for each timestamp
-    index_data = []
-    first_avg_ratio = None  # Track first ratio for this period
+    # Step 5: Calculate price ratios for all tickers at once (vectorized)
+    ratio_cols = []
+    for ticker in period_data.keys():
+        col_name = f'close_{ticker}'
+        ratio_col_name = f'ratio_{ticker}'
+        combined_df = combined_df.with_columns([
+            (pl.col(col_name) / base_prices[ticker]).alias(ratio_col_name)
+        ])
+        ratio_cols.append(ratio_col_name)
 
-    for ts in common_timestamps:
-        # Get current prices and calculate ratios for all tickers
-        price_ratios = []
+    # Step 6: Calculate equal-weighted average ratio (mean of all ratios)
+    combined_df = combined_df.with_columns([
+        pl.mean_horizontal([pl.col(col) for col in ratio_cols]).alias('avg_ratio')
+    ])
 
-        for ticker, df in period_data.items():
-            current_price_series = df.filter(pl.col('timestamp') == ts)['close']
-            if len(current_price_series) == 0:
-                continue
+    # Get first average ratio for normalization
+    first_avg_ratio = combined_df['avg_ratio'][0]
 
-            current_price = current_price_series[0]
-            base_price = base_prices[ticker]
+    # Step 7: Calculate index values
+    if last_index_value is not None:
+        # Continue from previous period
+        combined_df = combined_df.with_columns([
+            (last_index_value * (pl.col('avg_ratio') / first_avg_ratio)).alias('index_value')
+        ])
+    else:
+        # First period: start from base level 1000
+        combined_df = combined_df.with_columns([
+            (1000 * pl.col('avg_ratio')).alias('index_value')
+        ])
 
-            # Price ratio: S_i,t / S_i,t_r (relative to rebalancing time)
-            ratio = current_price / base_price
-            price_ratios.append(ratio)
-
-        if not price_ratios:
-            continue
-
-        # Equal-weighted: simple average of all price ratios
-        # This gives each constituent exactly 10% weight
-        avg_ratio = sum(price_ratios) / len(price_ratios)
-
-        # Track first ratio of this period
-        if first_avg_ratio is None:
-            first_avg_ratio = avg_ratio
-
-        # Calculate index value
-        if last_index_value is not None:
-            # Continue from previous period for smooth transitions
-            # At rebalancing point (first timestamp), the index should continue
-            # from the previous period's last value
-            index_value = last_index_value * (avg_ratio / first_avg_ratio)
-        else:
-            # First period: start from base level 1000
-            # When avg_ratio = 1.0 (no change), index = 1000
-            index_value = 1000 * avg_ratio
-
-        index_data.append({
-            'timestamp': ts,
-            'index_value': index_value,
-            'avg_ratio': avg_ratio
-        })
-
-    if not index_data:
-        return None
-
-    # Create DataFrame
-    result_df = pl.DataFrame(index_data)
-
-    # Calculate returns
-    result_df = result_df.with_columns([
+    # Step 8: Calculate returns
+    combined_df = combined_df.with_columns([
         (pl.col('index_value') / pl.col('index_value').shift(1) - 1).alias('index_return')
     ])
 
-    # Drop intermediate calculation column
-    result_df = result_df.drop('avg_ratio')
+    # Step 9: Keep only the essential columns
+    result_df = combined_df.select(['timestamp', 'index_value', 'index_return'])
 
     return result_df
 
@@ -812,7 +948,7 @@ def create_upbit_benchmark_candles(data_dir: Path, timeframe: str, output_dir: P
     # Step 3: Calculate equal-weighted index
     console.print(f"[cyan]Step 3:[/cyan] Calculating equal-weighted index...")
 
-    index_df = calculate_equal_weighted_index(filtered_data, None)
+    index_df = calculate_equal_weighted_index(filtered_data, None, show_progress=True)
 
     if index_df is None or index_df.height == 0:
         console.print(f"[red]✗[/red] Failed to calculate index")
@@ -837,7 +973,19 @@ def create_upbit_benchmark_candles(data_dir: Path, timeframe: str, output_dir: P
 
 
 if __name__ == "__main__":
-    generate_benchmark_summary()
+    # First, ask which exchange summary to view
+    console.print("\n[bold]Select which exchange data to check:[/bold]")
+    console.print("  [cyan]1.[/cyan] Binance (CMC Top 10 with monthly rebalancing)")
+    console.print("  [cyan]2.[/cyan] Upbit (Fixed 10 constituents)")
+    console.print("  [cyan]3.[/cyan] Both")
+
+    summary_choice = input("\nChoice (1-3): ").strip()
+
+    if summary_choice in ['1', '3']:
+        generate_benchmark_summary()
+
+    if summary_choice in ['2', '3']:
+        generate_upbit_benchmark_summary()
 
     # Optionally create benchmarks if data is available
     data_dir = Path("file")
