@@ -73,41 +73,37 @@ CONFIG = {
         '1d': '1d'
     },
     
-    # Hollstein et al. (2020): 6 months for HF, 12 months for daily
-    'window_months': {
-        '1m': 6,
-        '5m': 6,
-        '15m': 6,
-        '30m': 6,
-        '1h': 6,
-        '1d': 12,
-    },
-    
-    # Window in days (crypto trades every day)
+    # Hollstein et al. (2020): Optimal window for beta estimation
+    # Shorter windows for HF data (sufficient obs + timely), longer for daily
     'window_days': {
-        '1m': 180,    # 6 months * 30 days
-        '5m': 180,
-        '15m': 180,
-        '30m': 180,
-        '1h': 180,
-        '1d': 365,    # 12 months
+        '1m': 30,     # 1 month (43K obs) - Hollstein recommended
+        '5m': 30,     # 1 month (8.6K obs)
+        '15m': 60,    # 2 months (5.7K obs)
+        '30m': 60,    # 2 months (2.8K obs)
+        '1h': 90,     # 3 months (2.1K obs)
+        '1d': 252,    # 1 year (252 obs) - traditional recommendation
     },
     
-    # Minimum observations per frequency
+    # Minimum observations per frequency (for valid beta estimation)
     'min_observations': {
-        '1m': 50000,
-        '5m': 10000,
-        '15m': 5000,
-        '30m': 2000,
-        '1h': 1000,
-        '1d': 100,
+        '1m': 10000,   # ~7 days of 1m data
+        '5m': 2000,    # ~7 days of 5m data
+        '15m': 1000,   # ~10 days of 15m data
+        '30m': 500,    # ~10 days of 30m data
+        '1h': 300,     # ~12 days of 1h data
+        '1d': 60,      # ~2 months of daily data
     },
     
     # Frazzini & Pedersen (2014): Beta shrinkage toward 1
     'beta_shrinkage': 0.6,  # Vasicek shrinkage
     
-    # Portfolio settings (15 cryptos = 5 quintiles x 3 each)
-    'n_portfolios': 5,
+    # Portfolio settings per exchange
+    # Binance: 15 cryptos = 3 portfolios (5 each)
+    # Upbit: 10 cryptos = 2 portfolios (5 each: Low vs High)
+    'n_portfolios': {
+        'binance': 3,  # Low, Mid, High
+        'upbit': 2,    # Low, High (5개씩)
+    },
     
     # Methods to compare
     'methods': {
@@ -426,15 +422,16 @@ def analyze_frequency(frequency: str, exchange: str = 'binance'):
     print(f"   Date Range: {asset_returns.index[0]} to {asset_returns.index[-1]}")
     
     # Window parameters
-    window_months = CONFIG['window_months'].get(frequency, 6)
-    window_days = CONFIG['window_days'].get(frequency, 180)
+    window_days = CONFIG['window_days'].get(frequency, 30)
     obs_per_day = CRYPTO_MINUTES_PER_DAY // CRYPTO_FREQUENCY_MINUTES.get(frequency, 1)
     window_obs = window_days * obs_per_day
     
-    print(f"   Window: {window_months} months ({window_days} days) - Hollstein et al. (2020)")
+    # Portfolio settings per exchange
+    n_portfolios = CONFIG['n_portfolios'].get(exchange, 3)
+    
+    print(f"   Window: {window_days} days ({window_obs:,} obs) - Hollstein et al. (2020)")
     print(f"   Beta Shrinkage: {CONFIG['beta_shrinkage']} (Vasicek)")
-    print(f"   Portfolios: {CONFIG['n_portfolios']} (Quintile)")
-    print(f"   Window: {window_days} days ({window_obs:,} obs)")
+    print(f"   Portfolios: {n_portfolios} ({'Low/High' if n_portfolios == 2 else 'Tercile'})")
     print(f"   Rebalancing: Monthly (following paper)")
     
     K = int(np.sqrt(obs_per_day))
@@ -507,10 +504,10 @@ def analyze_frequency(frequency: str, exchange: str = 'binance'):
         
         # For each method, construct portfolios and calculate returns
         for method, betas in method_results.items():
-            if len(betas) < CONFIG['n_portfolios']:
+            if len(betas) < n_portfolios:
                 continue
             
-            portfolios = construct_portfolios(betas, CONFIG['n_portfolios'])
+            portfolios = construct_portfolios(betas, n_portfolios)
             
             if not portfolios:
                 continue
@@ -528,10 +525,9 @@ def analyze_frequency(frequency: str, exchange: str = 'binance'):
             if not portfolio_returns:
                 continue
             
-            n_port = CONFIG['n_portfolios']
             bab = calculate_bab_return(
                 portfolio_returns, portfolio_betas,
-                'Q1_Low', f'Q{n_port}_High'
+                'Q1_Low', f'Q{n_portfolios}_High'
             )
             
             for label, ret in portfolio_returns.items():
@@ -634,6 +630,7 @@ def analyze_frequency(frequency: str, exchange: str = 'binance'):
     
     n_periods = len(rebalance_dates) - 1
     print(f"   [OK] Processed {n_periods} rebalance periods (Monthly)")
+    print(f"   [DEBUG] all_results count: {len(all_results)}")
     
     if prediction_results:
         print(f"\n   [RMSE] Beta Prediction Accuracy:")
@@ -700,8 +697,10 @@ def create_summary(detailed_df: pd.DataFrame, prediction_df: pd.DataFrame = None
 # RESULTS DISPLAY
 # =============================================================================
 
-def print_comprehensive_summary(detailed_df: pd.DataFrame, summary_df: pd.DataFrame, prediction_df: pd.DataFrame = None):
+def print_comprehensive_summary(detailed_df: pd.DataFrame, summary_df: pd.DataFrame, prediction_df: pd.DataFrame = None, exchange: str = 'binance'):
     """Print comprehensive results summary."""
+    
+    n_portfolios = CONFIG['n_portfolios'].get(exchange, 3)
     
     print("\n" + "=" * 80)
     print("COMPREHENSIVE RESULTS SUMMARY")
@@ -715,20 +714,20 @@ def print_comprehensive_summary(detailed_df: pd.DataFrame, summary_df: pd.DataFr
     print(f"HF Window: 6 months (High-frequency)")
     print(f"Daily Window: 12 months")
     print(f"Beta Shrinkage: {CONFIG['beta_shrinkage']} (Vasicek)")
-    print(f"Portfolios: {CONFIG['n_portfolios']} (Quintile)")
+    print(f"Portfolios: {n_portfolios} ({'Low/High' if n_portfolios == 2 else 'Tercile'})")
     print(f"Rebalancing: Monthly")
     print(f"BAB Formula: (1/beta_L) x R_L - (1/beta_H) x R_H")
     print(f"Market: 24/7 trading ({CRYPTO_MINUTES_PER_DAY} min/day)")
     
     # Frequency info
     print("\n" + "-" * 60)
-    print(f"{'Frequency':<10} {'Window':<15} {'Obs/Day':>10}")
+    print(f"{'Frequency':<10} {'Window (days)':<15} {'Obs/Day':>10}")
     print("-" * 60)
     for freq in CONFIG['frequencies']:
         freq_display = CONFIG['freq_display'].get(freq, freq)
-        window = f"{CONFIG['window_months'].get(freq, 6)} months"
+        window_days = CONFIG['window_days'].get(freq, 30)
         obs_per_day = CRYPTO_MINUTES_PER_DAY // CRYPTO_FREQUENCY_MINUTES.get(freq, 1)
-        print(f"{freq_display:<10} {window:<15} {obs_per_day:>10}")
+        print(f"{freq_display:<10} {window_days:<15} {obs_per_day:>10}")
     
     # 2. Beta Prediction Accuracy
     if prediction_df is not None and not prediction_df.empty:
@@ -912,34 +911,66 @@ def main():
     print("Following Hollstein et al. (2020) & Frazzini & Pedersen (2014)")
     print("=" * 80)
     print(f"Analysis Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"Data Source: Binance Cryptocurrency")
     print(f"Frequencies: {', '.join(CONFIG['freq_display'].values())}")
     print(f"Trading Hours: 24/7 ({CRYPTO_MINUTES_PER_DAY} min/day)")
     print("=" * 80)
     
-    # Run full analysis
-    detailed_df, prediction_df, summary_df = run_full_analysis(exchange='binance')
-    
-    if detailed_df is None:
-        print("\n[ERROR] Analysis failed!")
-        return
-    
-    # Print comprehensive summary
-    print_comprehensive_summary(detailed_df, summary_df, prediction_df)
-    
-    # Save results
     output_dir = Path(__file__).parent
-    save_results(detailed_df, summary_df, output_dir)
     
-    # Save prediction results
-    if prediction_df is not None and not prediction_df.empty:
-        pred_path = output_dir / "crypto_beta_prediction.csv"
-        prediction_df.to_csv(pred_path, index=False)
-        print(f"[SAVED] Beta prediction results saved to: {pred_path}")
+    # Analyze both exchanges
+    exchanges = ['binance', 'upbit']
+    
+    for exchange in exchanges:
+        print("\n" + "#" * 80)
+        print(f"# ANALYZING: {exchange.upper()}")
+        print("#" * 80)
+        
+        # Run full analysis
+        detailed_df, prediction_df, summary_df = run_full_analysis(exchange=exchange)
+        
+        if detailed_df is None or detailed_df.empty:
+            print(f"\n[WARNING] No data available for {exchange}, skipping...")
+            continue
+        
+        # Add exchange column
+        detailed_df['Exchange'] = exchange
+        if prediction_df is not None and not prediction_df.empty:
+            prediction_df['Exchange'] = exchange
+        if summary_df is not None and not summary_df.empty:
+            summary_df['Exchange'] = exchange
+        
+        # Print comprehensive summary
+        print(f"\n{'='*60}")
+        print(f"{exchange.upper()} RESULTS")
+        print('='*60)
+        print_comprehensive_summary(detailed_df, summary_df, prediction_df, exchange=exchange)
+        
+        # Save results with exchange prefix
+        detailed_path = output_dir / f"{exchange}_crypto_analysis_results.csv"
+        summary_path = output_dir / f"{exchange}_crypto_analysis_summary.csv"
+        
+        detailed_df.to_csv(detailed_path, index=False)
+        summary_df.to_csv(summary_path, index=False)
+        print(f"[SAVED] {exchange} results saved to: {detailed_path}")
+        print(f"[SAVED] {exchange} summary saved to: {summary_path}")
+        
+        # Save prediction results
+        if prediction_df is not None and not prediction_df.empty:
+            pred_path = output_dir / f"{exchange}_crypto_beta_prediction.csv"
+            prediction_df.to_csv(pred_path, index=False)
+            print(f"[SAVED] {exchange} beta prediction saved to: {pred_path}")
+        
+        # Save BAB returns
+        bab_df = detailed_df[detailed_df['Portfolio'] == 'BAB'].copy()
+        if not bab_df.empty:
+            bab_path = output_dir / f"{exchange}_crypto_bab_returns.csv"
+            bab_df.to_csv(bab_path, index=False)
+            print(f"[SAVED] {exchange} BAB returns saved to: {bab_path}")
     
     elapsed_time = time.time() - start_time
     print("\n" + "=" * 80)
     print(f"ANALYSIS COMPLETE! (Elapsed Time: {elapsed_time:.2f} seconds)")
+    print(f"Exchanges analyzed: {', '.join(exchanges)}")
     print("=" * 80)
 
 

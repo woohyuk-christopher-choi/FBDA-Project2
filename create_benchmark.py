@@ -483,17 +483,21 @@ def find_upbit_data_file(data_dir: Path, ticker: str, timeframe: str) -> Optiona
     Returns:
         Path to the data file if found, None otherwise
     """
+    # Convert timeframe format: '1m' -> '1m', '1h' -> '1h', '1d' -> '1d'
+    tf = timeframe
+    
     possible_files = [
-        # New pattern: upbit_KRW_{ticker}_{timeframe}.arrow
-        data_dir / f"upbit_KRW_{ticker}_{timeframe}.arrow",
-        data_dir / f"upbit_KRW_{ticker}_{timeframe}.parquet",
-        data_dir / f"upbit_{ticker}_{timeframe}.arrow",
-        data_dir / f"upbit_{ticker}_{timeframe}.parquet",
-        # In upbit subdirectory
-        data_dir / "upbit" / f"upbit_KRW_{ticker}_{timeframe}.arrow",
-        data_dir / "upbit" / f"upbit_KRW_{ticker}_{timeframe}.parquet",
-        data_dir / "upbit" / f"upbit_{ticker}_{timeframe}.arrow",
-        data_dir / "upbit" / f"upbit_{ticker}_{timeframe}.parquet",
+        # Actual structure: data/upbit/KRW_{ticker}/upbit_KRW_{ticker}_{tf}.arrow
+        data_dir / "upbit" / f"KRW_{ticker}" / f"upbit_KRW_{ticker}_{tf}.arrow",
+        data_dir / "upbit" / f"KRW_{ticker}" / f"upbit_KRW_{ticker}_{tf}.parquet",
+        # Alternative patterns
+        data_dir / "upbit" / f"KRW-{ticker}" / f"upbit_KRW_{ticker}_{tf}.arrow",
+        data_dir / "upbit" / f"KRW-{ticker}" / f"upbit_KRW_{ticker}_{tf}.parquet",
+        # Old patterns (flat structure)
+        data_dir / f"upbit_KRW_{ticker}_{tf}.arrow",
+        data_dir / f"upbit_KRW_{ticker}_{tf}.parquet",
+        data_dir / "upbit" / f"upbit_KRW_{ticker}_{tf}.arrow",
+        data_dir / "upbit" / f"upbit_KRW_{ticker}_{tf}.parquet",
     ]
 
     for file_path in possible_files:
@@ -719,14 +723,16 @@ def calculate_equal_weighted_index(period_data: Dict[str, pl.DataFrame],
 
     # Create base timestamp DataFrame
     base_ts_df = pl.DataFrame({'timestamp': all_timestamps}).with_columns([
-        pl.col('timestamp').cast(pl.Datetime('ms'))
+        pl.col('timestamp').cast(pl.Datetime('us'))
     ])
 
     # Step 2: Join all ticker data into a single wide DataFrame (much faster than repeated filtering)
     combined_df = base_ts_df
 
     for ticker, df in period_data.items():
-        ticker_data = df.select(['timestamp', 'close']).rename({'close': f'close_{ticker}'})
+        ticker_data = df.select(['timestamp', 'close']).with_columns([
+            pl.col('timestamp').cast(pl.Datetime('us'))
+        ]).rename({'close': f'close_{ticker}'})
         combined_df = combined_df.join(ticker_data, on='timestamp', how='left', coalesce=True)
 
     # Forward-fill and backward-fill missing values for all tickers at once
@@ -890,9 +896,14 @@ def create_upbit_benchmark_candles(data_dir: Path, timeframe: str, output_dir: P
                 return None
 
             # Standardize column names for Upbit
-            if 'timestamp' not in df.columns:
-                # Upbit typically uses 'candle_date_time_kst' or similar
-                date_cols = ['candle_date_time_kst', 'candle_date_time_utc', 'date', 'time', 'datetime']
+            # Use candle_date_time_utc for regular candle timestamps (not datetime which has irregular collection times)
+            if 'candle_date_time_utc' in df.columns:
+                # Drop existing timestamp column if present, then rename
+                if 'timestamp' in df.columns:
+                    df = df.drop('timestamp')
+                df = df.rename({'candle_date_time_utc': 'timestamp'})
+            elif 'timestamp' not in df.columns:
+                date_cols = ['candle_date_time_kst', 'date', 'time']
                 for col in date_cols:
                     if col in df.columns:
                         df = df.rename({col: 'timestamp'})

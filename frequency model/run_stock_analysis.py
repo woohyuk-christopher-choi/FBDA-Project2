@@ -79,24 +79,16 @@ CONFIG = {
     # Include 1min to test if TARV can handle microstructure noise
     'frequencies': ['1min', '5min', '15min', '30min', '1h', '1d'],
     
-    # Hollstein et al. (2020): HF uses 6 months, Daily uses 12 months
-    'window_months': {
-        '1min': 6,    # High-frequency: 6 months
-        '5min': 6,
-        '15min': 6,
-        '30min': 6,   # Optimal in Hollstein et al.
-        '1h': 6,
-        '1d': 12      # Daily: 12 months (historical approach)
-    },
-    
-    # Convert to trading days (approx 21 days/month)
+    # Hollstein et al. (2020): Optimal window for beta estimation
+    # Shorter windows for HF data (sufficient obs + timely), longer for daily
+    # Trading days basis (~21 days/month, 252 days/year)
     'window_days': {
-        '1min': 126,   # 6 months * 21 days
-        '5min': 126,
-        '15min': 126,
-        '30min': 126,
-        '1h': 126,
-        '1d': 252      # 12 months * 21 days
+        '1min': 22,    # 1 month (~8,580 obs) - Hollstein recommended
+        '5min': 22,    # 1 month (~1,716 obs)
+        '15min': 44,   # 2 months (~1,144 obs)
+        '30min': 44,   # 2 months (~572 obs)
+        '1h': 63,      # 3 months (~390 obs)
+        '1d': 252      # 12 months (252 obs) - traditional
     },
     
     # Frazzini & Pedersen (2014) methodology
@@ -104,13 +96,14 @@ CONFIG = {
     'beta_shrinkage': 0.6,     # β_shrunk = 0.6 × β + 0.4 × 1.0
     'n_portfolios': 5,         # Quintile portfolios (5 groups for ~500 stocks)
     
+    # Minimum observations per frequency (for valid beta estimation)
     'min_observations': {
-        '1min': 10000,   # 1min has most observations
-        '5min': 5000,
-        '15min': 2000,
-        '30min': 1000,
-        '1h': 500,
-        '1d': 100
+        '1min': 2000,    # ~5 days of 1min data
+        '5min': 500,     # ~6 days of 5min data
+        '15min': 200,    # ~8 days of 15min data
+        '30min': 100,    # ~8 days of 30min data
+        '1h': 50,        # ~8 days of 1h data
+        '1d': 60         # ~3 months of daily data
     },
     
     'methods': {
@@ -235,8 +228,7 @@ def analyze_single_frequency(
     print('='*60)
     
     # Get config - Hollstein et al. (2020) window sizes
-    window_days = CONFIG['window_days'].get(frequency, 126)
-    window_months = CONFIG['window_months'].get(frequency, 6)
+    window_days = CONFIG['window_days'].get(frequency, 22)
     n_portfolios = CONFIG['n_portfolios']
     beta_shrinkage = CONFIG['beta_shrinkage']
     
@@ -262,10 +254,15 @@ def analyze_single_frequency(
     n_stocks = len(stock_returns.columns)
     n_obs = len(stock_returns)
     
+    # Calculate window sizes (US market: 390 min/day)
+    freq_minutes = STOCK_FREQUENCY_MINUTES.get(frequency, 1)
+    obs_per_day = STOCK_MINUTES_PER_DAY // freq_minutes
+    window_obs = obs_per_day * window_days
+    
     print(f"   Stocks: {n_stocks}")
     print(f"   Observations: {n_obs:,}")
     print(f"   Date Range: {stock_returns.index[0]} to {stock_returns.index[-1]}")
-    print(f"   Window: {window_months} months ({window_days} days) - Hollstein et al. (2020)")
+    print(f"   Window: {window_days} trading days ({window_obs:,} obs) - Hollstein et al. (2020)")
     print(f"   Beta Shrinkage: {beta_shrinkage} (Vasicek)")
     print(f"   Portfolios: {n_portfolios} (Quintile)")
     
@@ -273,11 +270,6 @@ def analyze_single_frequency(
     min_obs = CONFIG['min_observations'].get(frequency, 1000)
     if n_obs < min_obs:
         print(f"[WARNING] Not enough observations ({n_obs} < {min_obs})")
-    
-    # Calculate window sizes (US market: 390 min/day)
-    freq_minutes = STOCK_FREQUENCY_MINUTES.get(frequency, 1)
-    obs_per_day = STOCK_MINUTES_PER_DAY // freq_minutes
-    window_obs = obs_per_day * window_days
     
     # For daily data, ensure K >= 3
     if frequency == '1d':
@@ -658,22 +650,22 @@ def print_comprehensive_summary(detailed_df: pd.DataFrame, summary_df: pd.DataFr
     print("\n" + "-" * 60)
     print("PARAMETER SETTINGS (Hollstein et al. 2020):")
     print("-" * 60)
-    print(f"HF Window: {CONFIG['window_months'].get('30min', 6)} months (High-frequency)")
-    print(f"Daily Window: {CONFIG['window_months'].get('1d', 12)} months")
+    print(f"HF Window: {CONFIG['window_days'].get('30min', 44)} days (High-frequency)")
+    print(f"Daily Window: {CONFIG['window_days'].get('1d', 252)} days")
     print(f"Beta Shrinkage: {CONFIG['beta_shrinkage']} (Vasicek)")
     print(f"Portfolios: {CONFIG['n_portfolios']} (Quintile)")
     print("Rebalancing: Monthly")
     print("BAB Formula: (1/β_L) × R_L - (1/β_H) × R_H")
     
     print("\n" + "-" * 60)
-    print(f"{'Frequency':<10} {'Window':<15} {'Obs/Day':<10}")
+    print(f"{'Frequency':<10} {'Window (days)':<15} {'Obs/Day':<10}")
     print("-" * 60)
     
     for freq in CONFIG['frequencies']:
-        window_months = CONFIG['window_months'].get(freq, 6)
+        window_days = CONFIG['window_days'].get(freq, 22)
         freq_minutes = STOCK_FREQUENCY_MINUTES.get(freq, 1)
         obs_per_day = STOCK_MINUTES_PER_DAY // freq_minutes
-        print(f"{freq:<10} {window_months} months{'':<7} {obs_per_day:>6}")
+        print(f"{freq:<10} {window_days:<15} {obs_per_day:>6}")
     
     # 2. Beta Prediction Accuracy (Hollstein et al. 2020 - KEY RESULT)
     if prediction_df is not None and not prediction_df.empty:
