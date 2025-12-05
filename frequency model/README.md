@@ -6,27 +6,36 @@ A module for Low-Beta Anomaly analysis based on TARV (Tail-Adaptive Realized Vol
 
 ```
 frequency model/
-├── run_crypto_analysis.py   # Cryptocurrency analysis executable
-├── run_stock_analysis.py    # Stock analysis executable
-├── data_loader.py           # Cryptocurrency data loader (Binance)
-├── stock_data_loader.py     # Stock data loader (S&P500)
-├── tarv.py                  # TARV core functions
-├── modeling.py              # Modeling utilities
-├── portfolio.py             # Portfolio construction
-└── README.md                # This document
+├── run_crypto_analysis.py     # Cryptocurrency analysis executable
+├── run_stock_analysis.py      # Stock analysis executable
+├── preprocess_stock_data.py   # Stock data preprocessor (Excel -> Parquet)
+├── data_loader.py             # Cryptocurrency data loader (Binance)
+├── stock_data_loader.py       # Stock data loader (S&P500)
+├── tarv.py                    # TARV core functions
+├── modeling.py                # Modeling utilities
+├── portfolio.py               # Portfolio construction
+└── README.md                  # This document
 ```
 
 ## Quick Start
 
-### Run Cryptocurrency Analysis
+### 1. Preprocess Stock Data (First Time Only)
 ```bash
 cd "frequency model"
+python preprocess_stock_data.py
+```
+
+This converts the raw Excel file to efficient Parquet format:
+- Input: `data/S&P500_*.xlsx`
+- Output: `data/sp500/stocks_{freq}.parquet`, `data/sp500/market_{freq}.parquet`
+
+### 2. Run Cryptocurrency Analysis
+```bash
 python run_crypto_analysis.py
 ```
 
-### Run Stock Analysis
+### 3. Run Stock Analysis
 ```bash
-cd "frequency model"
 python run_stock_analysis.py
 ```
 

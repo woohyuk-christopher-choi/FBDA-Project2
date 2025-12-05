@@ -47,7 +47,7 @@ class CryptoDataLoader:
     def get_available_symbols(self) -> List[str]:
         """Get list of available symbols from directory structure."""
         if not self.base_path.exists():
-            print(f"⚠️  Data directory not found: {self.base_path}")
+            print(f"[WARNING] Data directory not found: {self.base_path}")
             return []
         
         symbols = []
@@ -71,7 +71,7 @@ class CryptoDataLoader:
         filepath = self.base_path / symbol / filename
         
         if not filepath.exists():
-            print(f"⚠️  File not found: {filepath}")
+            print(f"[WARNING] File not found: {filepath}")
             return None
         
         try:
@@ -82,7 +82,11 @@ class CryptoDataLoader:
                 df = table.to_pandas()
             
             # Set datetime index
-            if 'datetime' in df.columns:
+            # For Upbit: use candle_date_time_utc (regular candle timestamps)
+            if self.config.exchange == 'upbit' and 'candle_date_time_utc' in df.columns:
+                df['datetime'] = pd.to_datetime(df['candle_date_time_utc'])
+                df.set_index('datetime', inplace=True)
+            elif 'datetime' in df.columns:
                 df['datetime'] = pd.to_datetime(df['datetime'])
                 df.set_index('datetime', inplace=True)
             elif 'timestamp' in df.columns:
@@ -104,7 +108,7 @@ class CryptoDataLoader:
             return df
             
         except Exception as e:
-            print(f"❌ Error loading {filepath}: {e}")
+            print(f"[ERROR] Error loading {filepath}: {e}")
             return None
     
     def load_multiple_symbols(
@@ -155,11 +159,11 @@ class MarketBenchmark:
         filepath = base_path / filename
         
         if not filepath.exists():
-            print(f"⚠️  Benchmark file not found: {filepath}")
+            print(f"[WARNING] Benchmark file not found: {filepath}")
             return None
             
         try:
-            print(f"📉 Loading Market Benchmark: {filename}")
+            print(f"[INFO] Loading Market Benchmark: {filename}")
             df = pd.read_parquet(filepath)
             
             # Set datetime index
@@ -193,7 +197,7 @@ class MarketBenchmark:
             return series
             
         except Exception as e:
-            print(f"❌ Error loading benchmark {filepath}: {e}")
+            print(f"[ERROR] Error loading benchmark {filepath}: {e}")
             return None
 
 
@@ -273,7 +277,7 @@ def prepare_data_for_analysis(
     valid_symbols = [col for col in prices.columns 
                      if prices[col].notna().sum() >= min_observations]
     prices = prices[valid_symbols]
-    print(f"✅ Loaded assets: {len(valid_symbols)} symbols")
+    print(f"[OK] Loaded assets: {len(valid_symbols)} symbols")
 
     # 5. Load market benchmark
     market_prices = MarketBenchmark.load_benchmark_from_file(
